@@ -1,0 +1,30 @@
+# virtual environments
+.venv/
+venv/
+env/
+Include/
+Lib/
+Scripts/
+include/
+lib/
+scripts/
+share/
+pyvenv.cfg
+
+# local dependency freeze files
+reqis.txt
+requirements.lock.txt
+
+# generated/downloaded runtime assets
+blaze_face_short_range.tflite
+
+# cache
+__pycache__/
+*.pyc
+
+# model
+*.pt
+*.onnx
+
+# vscode
+.vscode/
