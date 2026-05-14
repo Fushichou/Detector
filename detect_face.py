@@ -1,73 +1,71 @@
 import cv2
+import mediapipe as mp
+from mediapipe.tasks import python as mp_python
+from mediapipe.tasks.python import vision
+import urllib.request
+import os
 
-# ===== Haar Face Detection Constants =====
-_haar = None
-MAX_FACE_SCAN_W = 260  # หากกว้าง > นี้ → ย่อ ROI ก่อนสแกน (ลด CPU load)
+# ── โหลด model file ────────────────────────────────────────────────────────────
+MODEL_PATH = "blaze_face_short_range.tflite"
 
+def _ensure_model():
+    if not os.path.exists(MODEL_PATH):
+        print("[FaceDetect] กำลังดาวน์โหลด MediaPipe model...")
+        url = "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite"
+        urllib.request.urlretrieve(url, MODEL_PATH)
+        print("[FaceDetect] ดาวน์โหลดเสร็จแล้ว")
 
-def _get_haar():
-    """
-    LAZY LOAD: Haar cascade classifier
-    - โหลด 1 ครั้งตอน first call แล้ว reuse
-    - ลดจำนวนครั้ง disk I/O
-    """
-    global _haar
-    if _haar is None:
-        _haar = cv2.CascadeClassifier(
-            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+# ── Lazy load detector ─────────────────────────────────────────────────────────
+_detector = None
+
+def _get_detector():
+    global _detector
+    if _detector is None:
+        _ensure_model()
+        base_options = mp_python.BaseOptions(model_asset_path=MODEL_PATH)
+        options = vision.FaceDetectorOptions(
+            base_options=base_options,
+            min_detection_confidence=0.6
         )
-    return _haar
+        _detector = vision.FaceDetector.create_from_options(options)
+    return _detector
 
 
 def detect_face(roi):
     """
-    HAAR CASCADE: ตรวจจับใบหน้าใน ROI ของคน
-    
-    Optimization:
-    - หากกว้าง > MAX_FACE_SCAN_W → ย่อลง เพื่อลด cascade complexity
-    - ทำให้ HAAR scan เร็ว 4x
-    - Scale back พิกัด → ขนาด ROI ต้นแบบ
-    - equalizeHist ช่วย detect ใบหน้า ที่แสงมืด
-    
-    Returns: list of (x, y, w, h) ใน ROI coordinates
+    ตรวจจับใบหน้าใน ROI ด้วย MediaPipe Tasks API (ใหม่)
+    คืนค่า list of (x, y, w, h) ในระบบพิกัดของ roi
     """
     if roi is None or roi.size == 0:
         return []
 
-    # ===== SCALE DOWN to SCAN =====
-    scale = 1.0
-    scan = roi
-    if roi.shape[1] > MAX_FACE_SCAN_W:
-        # ย่อเพื่อลด computation
-        scale = MAX_FACE_SCAN_W / roi.shape[1]
-        scan = cv2.resize(roi, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    h, w = roi.shape[:2]
+    rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
 
-    # ===== PREPROCESSING =====
-    gray = cv2.cvtColor(scan, cv2.COLOR_BGR2GRAY)
-    gray = cv2.equalizeHist(gray)  # ปรับ contrast สำหรับ lighting variation
+    results = _get_detector().detect(mp_image)
 
-    # ===== CASCADE DETECT =====
-    faces = _get_haar().detectMultiScale(
-        gray,
-        scaleFactor=1.1,   # ความเร็ว vs ที่ใหญ่แตกต่าง
-        minNeighbors=7,    # บุคคลกรรม neighbor ต่ำ → detect ได้ง่ายขึ้น
-        minSize=(50, 50),  # ตัดใบหน้าเล็กๆ (noise)
-        flags=cv2.CASCADE_SCALE_IMAGE,
-    )
-
-    if len(faces) == 0:
+    if not results.detections:
         return []
 
-    # ===== SCALE BACK =====
-    inv = 1.0 / scale
-    return [
-        (int(x * inv), int(y * inv), int(w * inv), int(h * inv))
-        for (x, y, w, h) in faces
-    ]
+    faces = []
+    for det in results.detections:
+        bb = det.bounding_box
+        x1 = max(0, bb.origin_x)
+        y1 = max(0, bb.origin_y)
+        bw = bb.width
+        bh = bb.height
+
+        if bw < 20 or bh < 20:
+            continue
+
+        faces.append((x1, y1, bw, bh))
+
+    return faces
 
 
 def crop_face_fixed(frame, fx, fy, fw, fh, size=112):
-    """Crop ใบหน้าพร้อม padding แล้ว resize เป็น size x size สำหรับ embedding."""
+    """Crop ใบหน้าพร้อม padding แล้ว resize เป็น size×size สำหรับ embedding"""
     pad = int(max(fw, fh) * 0.2)
     x1 = max(0, fx - pad)
     y1 = max(0, fy - pad)
