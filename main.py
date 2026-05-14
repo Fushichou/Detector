@@ -22,8 +22,8 @@ from gui import FaceRecognitionGUI
 ALPHA = 0.35
 FACE_SIZE = 112
 GUI_INTERVAL_MS = 33          # ประมาณ 30 FPS สำหรับ GUI
-FACE_SCAN_INTERVAL = 0.25     # ตรวจหน้าไม่ถี่เกินไป ลดงาน Haar
-EMBED_INTERVAL = 1.00         # สร้าง embedding ต่อคนไม่เกิน 1 ครั้ง/วินาที
+FACE_SCAN_INTERVAL = 0.50     # ตรวจหน้าไม่ถี่เกินไป ลดงาน Haar
+EMBED_INTERVAL = 2.00         # สร้าง embedding ต่อคนไม่เกิน 1 ครั้ง/วินาที
 
 GREEN = (0, 220, 80)
 BLUE = (255, 160, 50)
