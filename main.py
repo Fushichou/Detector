@@ -71,6 +71,7 @@ def ema_match(smooth_boxes, humans, alpha=ALPHA, dist_thresh=150):
                 "found": False,
                 "face_box": None,
                 "face_img": None,
+                "face_aligned": False,
                 "last_face_ts": 0.0,
                 "last_embed_ts": 0.0,
             }
@@ -161,15 +162,28 @@ def main():
 
                 if now - person.get("last_face_ts", 0.0) >= FACE_SCAN_INTERVAL:
                     person["last_face_ts"] = now
-                    faces = detect_face(roi)  # Haar cascade
+                    faces = detect_face(roi, with_keypoints=True)  # MediaPipe face + eye keypoints
                     if faces:
                         # เลือก face ที่ใหญ่ที่สุด (ปกติจะเป็นหน้าตรง)
-                        fx, fy, fw, fh = max(faces, key=lambda fc: fc[2] * fc[3])
+                        face = max(faces, key=lambda fc: fc["box"][2] * fc["box"][3])
+                        fx, fy, fw, fh = face["box"]
                         person["face_box"] = (fx + x1, fy + y1, fw, fh)
-                        person["face_img"] = crop_face_fixed(roi, fx, fy, fw, fh, FACE_SIZE)
+                        face_img, face_aligned = crop_face_fixed(
+                            roi,
+                            fx,
+                            fy,
+                            fw,
+                            fh,
+                            FACE_SIZE,
+                            keypoints=face.get("keypoints"),
+                            return_aligned=True,
+                        )
+                        person["face_img"] = face_img
+                        person["face_aligned"] = face_aligned
                     else:
                         person["face_box"] = None
                         person["face_img"] = None
+                        person["face_aligned"] = False
 
                 # --- DeepFace Embedding (ช่วง 1.0s) ---
                 # DeepFace (GPU) หนักสุด ถ้า embed ทุกเฟรม GPU จะ saturate
@@ -179,7 +193,10 @@ def main():
                     continue  # โปรดปรานเวลา ยังไม่ถึง interval
 
                 person["last_embed_ts"] = now
-                emb = get_embedding(person["face_img"])  # DeepFace
+                emb = get_embedding(
+                    person["face_img"],
+                    aligned=person.get("face_aligned", False),
+                )  # DeepFace ArcFace
                 if emb is None:
                     continue
 

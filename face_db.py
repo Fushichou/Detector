@@ -109,26 +109,7 @@ def load_all():
 # ─── ค้นหา ────────────────────────────────────────────────────────────────────
 
 def find_match(query_vector: np.ndarray, db_records=None):
-    """
-    MATCHING: หาคนที่เหมือนที่สุดกับ query embedding
-    
-    Pipeline:
-    1. เปรียบเทียบ query กับทุก record ใน DB (dot product)
-    2. หา max similarity score
-    3. ถ้า score < THRESHOLD (0.55) → Unknown (ไม่ใช่ใคร)
-    4. ถ้า score >= THRESHOLD → return name + score
-    
-    Args:
-        query_vector: embedding ปัจจุบัน (unit vector 512-dim)
-        db_records: snapshot ของ DB (ถ้าส่งมา ไม่ query DB ซ้ำ → เร็ว)
-    
-    Returns: (name: str, similarity: float 0-1)
-    
-    THRESHOLD TUNING:
-    - 0.55 default (balanced)
-    - ↑ 0.60+: strict (False Negative ↑)
-    - ↓ 0.50: loose (False Positive ↑)
-    """
+
     if db_records is None:
         db_records = load_all()  # fallback: query DB if no snapshot
 
@@ -176,14 +157,23 @@ if __name__ == "__main__":
 
             if key == ord(' '):
                 # detect face จากกล้อง
-                faces = detect_face(frame)
+                faces = detect_face(frame, with_keypoints=True)
                 if not faces:
                     print("ไม่พบใบหน้า ลองใหม่")
                     continue
 
-                fx, fy, fw, fh = faces[0]
-                face_img = crop_face_fixed(frame, fx, fy, fw, fh)
-                emb = get_embedding(face_img)
+                face = max(faces, key=lambda fc: fc["box"][2] * fc["box"][3])
+                fx, fy, fw, fh = face["box"]
+                face_img, face_aligned = crop_face_fixed(
+                    frame,
+                    fx,
+                    fy,
+                    fw,
+                    fh,
+                    keypoints=face.get("keypoints"),
+                    return_aligned=True,
+                )
+                emb = get_embedding(face_img, aligned=face_aligned)
                 if emb is None:
                     print("ไม่สามารถสร้าง embedding ได้")
                     continue

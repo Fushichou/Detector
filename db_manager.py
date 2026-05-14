@@ -73,6 +73,7 @@ class CaptureWindow:
         self.running = True
         self.samples = []          # รูปใบหน้าที่ถ่ายแล้ว
         self.face_box = None
+        self.face_info = None
         self.latest_frame = None
 
         # ── Window ──────────────────────────────────────────────────────
@@ -135,8 +136,10 @@ class CaptureWindow:
                 time.sleep(0.01)
                 continue
             # detect ใบหน้าแบบ lightweight เพื่อวาด guide
-            faces = detect_face(frame)
-            self.face_box   = faces[0] if faces else None
+            faces = detect_face(frame, with_keypoints=True)
+            face = max(faces, key=lambda fc: fc["box"][2] * fc["box"][3]) if faces else None
+            self.face_info = face
+            self.face_box = face["box"] if face else None
             self.latest_frame = frame
 
     def _tick(self):
@@ -179,12 +182,22 @@ class CaptureWindow:
                                    parent=self.win)
             return
 
+        face_info = self.face_info or {}
         fx, fy, fw, fh = self.face_box
-        face_img = crop_face_fixed(frame, fx, fy, fw, fh, size=112)
+        face_img, face_aligned = crop_face_fixed(
+            frame,
+            fx,
+            fy,
+            fw,
+            fh,
+            size=112,
+            keypoints=face_info.get("keypoints"),
+            return_aligned=True,
+        )
         if face_img is None:
             return
 
-        self.samples.append(face_img)
+        self.samples.append({"image": face_img, "aligned": face_aligned})
         n = len(self.samples)
         self.count_lbl.configure(text=f"รูปที่ถ่าย: {n}")
         if n >= 1:
@@ -203,8 +216,11 @@ class CaptureWindow:
         def _do_save():
             pid = add_person(self.name)
             ok = 0
-            for img in self.samples:
-                emb = get_embedding(img)
+            for sample in self.samples:
+                emb = get_embedding(
+                    sample["image"],
+                    aligned=sample.get("aligned", False),
+                )
                 if emb is not None:
                     add_vector(pid, emb)
                     ok += 1
@@ -411,6 +427,7 @@ class DBManager:
         win.running = True
         win.samples = []
         win.face_box = None
+        win.face_info = None
         win.latest_frame = None
 
         win.win = tk.Toplevel(self.root)
@@ -427,8 +444,11 @@ class DBManager:
             win.win.update()
             def _do():
                 ok = 0
-                for img in win.samples:
-                    emb = get_embedding(img)
+                for sample in win.samples:
+                    emb = get_embedding(
+                        sample["image"],
+                        aligned=sample.get("aligned", False),
+                    )
                     if emb is not None:
                         add_vector(person_id, emb)
                         ok += 1
