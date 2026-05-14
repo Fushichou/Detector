@@ -1,7 +1,7 @@
 from ultralytics import YOLO
 import cv2
 
-IMG_SIZE = 320 
+IMG_SIZE = 416
 MIN_W = 30
 MIN_H = 50
 
@@ -10,13 +10,12 @@ MIN_H = 50
 model = YOLO("yolo11n.pt")  # nano-sized: ความเร็ว > ความแม่นยำ
 model.fuse()
 
-
 def detect_human(frame):
     """
     YOLO11n detection: ตรวจจับคนจากเฟรมภาพ
     
     Pipeline:
-    1. Resize frame → 320x320 (ลด inference time 4x vs 640x640)
+    1. Resize frame → 416x416 (ลด inference time 4x vs 640x640)
     2. Run YOLO inference (classes=[0] = 'person' only)
     3. Scale back coordinates → frame size
     4. Filter: บุคคลต้องขนาดต่ำสุด MIN_W x MIN_H (remove noise)
@@ -27,20 +26,19 @@ def detect_human(frame):
     small = cv2.resize(frame, (IMG_SIZE, IMG_SIZE), interpolation=cv2.INTER_AREA)
     
     # YOLO INFERENCE: ส่งเฟรมเล็กเข้า model
-    # conf=0.55: ลด false positive
-    # iou=0.45: tight NMS → นับเป็นบุคคลต่างกัน
+    # conf=0.80: ลด false positive
+    # iou=0.5: tight NMS → นับเป็นบุคคลต่างกัน
     # classes=[0]: ตรวจจับแค่ 'person' (skip ไอเทม อื่นๆ)
     # half=False: ใช้ FP32 (เสถียรกว่า เมื่อไม่ต้องการ FP16)
     # max_det=20: max 20 คนต่อเฟรม
     results = model(
         small,
         imgsz=IMG_SIZE,
-        conf=0.70,
-        iou=0.45,
+        conf=0.80,
+        iou=0.5,
         classes=[0],
         verbose=False,
         half=False,
-        max_det=20,
     )
 
     h, w = frame.shape[:2]

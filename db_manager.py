@@ -10,12 +10,12 @@ from tkinter import ttk, messagebox, simpledialog
 import cv2
 import threading
 import time
-from PIL import Image, ImageDraw, ImageTk
+from PIL import Image, ImageTk
 
 from camera import open_camera
 from detect_face import detect_face, crop_face_fixed
 from face_embedding import get_embedding
-from face_db import init_db, _connect, add_person, add_vector, load_all
+from face_db import init_db, _connect, add_person, add_vector
 
 # ── Palette ───────────────────────────────────────────────────────────────────
 BG        = "#0d1117"
@@ -51,14 +51,12 @@ def db_list_persons():
     con.close()
     return rows   # [(id, name, cnt), ...]
 
-
 def db_delete_person(person_id):
     con = _connect()
     con.execute("DELETE FROM face_vectors WHERE person_id=?", (person_id,))
     con.execute("DELETE FROM persons WHERE id=?", (person_id,))
     con.commit()
     con.close()
-
 
 # ── Capture Window (กล้องเพื่อเพิ่มคน) ──────────────────────────────────────
 class CaptureWindow:

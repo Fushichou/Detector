@@ -107,13 +107,6 @@ def draw_overlay(frame, tracked):
 
 
 def main():
-    """
-    ARCHITECTURE โหลด YOLO + face detector + embedding model ครั้งเดียวตอน init
-    จากนั้นแยก 3 threads:
-    1. camera_thread: อ่านเฟรมล่าสุด ลด buffer latency
-    2. detect_thread: ทำ YOLO + Haar + embedding โดยไม่บล็อก GUI
-    3. GUI thread (main): Tkinter render 30 FPS จาก state ล่าสุด
-    """
     init_db()
     db_records = load_all()
     print(f"[DB] Loaded {len(db_records)} faces")
@@ -126,12 +119,6 @@ def main():
     tracked_state = {"value": []}
 
     def camera_thread():
-        """
-        CAMERA THREAD: อ่านเฟรมล่าสุดจากกล้องตลอดเวลา
-        - ไม่ใช้ queue หรือ buffer เพื่อลด latency
-        - ทิ้งเฟรมเก่า ให้ detect_thread ใช้เฟรมล่าสุดเท่านั้น
-        - sleep 0.01s เมื่อ camera ล้มเหลว (USB disconnect ฯลฯ)
-        """
         while not stop_event.is_set():
             ret, frame = cap.read()
             if not ret:
@@ -142,18 +129,6 @@ def main():
         cap.release()
 
     def detect_thread():
-        """
-        DETECT THREAD: ทำ inference หนัก (YOLO, Haar, DeepFace)
-        
-        Pipeline:
-        1. YOLO detect human คน: ปรับ confidence + IoU ให้ balance
-        2. EMA match: จับคู่ box กับ track เดิม สร้าง smooth effect
-        3. Haar face: สแกนเป็นช่วง (0.25s) เพื่อลดเพิ่มภาระ
-        4. DeepFace embedding: ความถี่ 1s/คน เพื่อหลีกเลี่ยง GPU saturate
-        5. find_match: ค้นหาชื่อในฐานข้อมูลด้วย cosine similarity
-        
-        ทำงานแยกจาก GUI → GUI ไม่ค้างระหว่าง inference
-        """
         nonlocal db_records
         tracked = []
         last_frame_obj = None
@@ -184,9 +159,6 @@ def main():
                 if roi.size == 0:
                     continue
 
-                # --- HAAR Face Scan (ช่วง 0.25s) ---
-                # Haar เป็น lightweight แต่ต้อง scan ROI ทั้งหมด
-                # ลด frequency ลงจาก FPS เป็น 4/วินาที
                 if now - person.get("last_face_ts", 0.0) >= FACE_SCAN_INTERVAL:
                     person["last_face_ts"] = now
                     faces = detect_face(roi)  # Haar cascade
@@ -213,7 +185,7 @@ def main():
 
                 # ค้นหาชื่อในฐานข้อมูล
                 with db_lock:
-                    records_snapshot = db_records
+                    records_snapshot = list(db_records)
                 name, sim = find_match(emb, records_snapshot)
                 person["identity"] = name
                 person["sim"] = sim
@@ -238,11 +210,11 @@ def main():
         nonlocal t_prev
 
         with state_lock:
-            frame = latest_frame["value"]  # เฟรมกล้องล่าสุด
-            tracked = tracked_state["value"]  # ผล detection ล่าสุด
+            frame = latest_frame["value"]
+            tracked = tracked_state["value"] 
 
         if frame is None:
-            return  # อยังไม่เริ่มถ่ายภาพ
+            return 
 
         # ===== FPS Counter =====
         t_now = time.perf_counter()
