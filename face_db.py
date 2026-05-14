@@ -14,7 +14,7 @@ import io
 import os
 
 DB_PATH = "faces.db"
-THRESHOLD = 0.55  # cosine similarity ต่ำกว่านี้ = Unknown
+THRESHOLD = 0.70  # cosine similarity ต่ำกว่านี้ = Unknown
 
 
 def _connect():
@@ -80,8 +80,14 @@ def register_face(name, face_embedding: np.ndarray):
 
 def load_all():
     """
-    โหลด vector ทั้งหมดจาก DB
-    คืนค่า list of {"name": str, "vector": np.ndarray}
+    โหลด embedding vectors ทั้งหมดจาก DB ได้ตลอด
+    
+    Returns: list of {
+        "name": str,
+        "vector": np.ndarray float32 shape (512,) unit vector
+    }
+    
+    Used in: detect_thread (snapshot copy ด้วย db_lock)
     """
     con = _connect()
     rows = con.execute("""
@@ -94,7 +100,7 @@ def load_all():
     records = []
     for name, blob in rows:
         buf = io.BytesIO(blob)
-        vec = np.load(buf)
+        vec = np.load(buf)  # numpy array เก็บ blob
         records.append({"name": name, "vector": vec})
 
     return records
@@ -104,13 +110,27 @@ def load_all():
 
 def find_match(query_vector: np.ndarray, db_records=None):
     """
-    เปรียบเทียบ query_vector กับทุก vector ใน DB
-    คืนค่า (name, similarity) หรือ ("Unknown", score)
-
-    db_records: ถ้าส่งมาจะใช้เลย (ไม่ต้อง query DB ซ้ำ)
+    MATCHING: หาคนที่เหมือนที่สุดกับ query embedding
+    
+    Pipeline:
+    1. เปรียบเทียบ query กับทุก record ใน DB (dot product)
+    2. หา max similarity score
+    3. ถ้า score < THRESHOLD (0.55) → Unknown (ไม่ใช่ใคร)
+    4. ถ้า score >= THRESHOLD → return name + score
+    
+    Args:
+        query_vector: embedding ปัจจุบัน (unit vector 512-dim)
+        db_records: snapshot ของ DB (ถ้าส่งมา ไม่ query DB ซ้ำ → เร็ว)
+    
+    Returns: (name: str, similarity: float 0-1)
+    
+    THRESHOLD TUNING:
+    - 0.55 default (balanced)
+    - ↑ 0.60+: strict (False Negative ↑)
+    - ↓ 0.50: loose (False Positive ↑)
     """
     if db_records is None:
-        db_records = load_all()
+        db_records = load_all()  # fallback: query DB if no snapshot
 
     if not db_records:
         return "Unknown", 0.0
@@ -118,18 +138,19 @@ def find_match(query_vector: np.ndarray, db_records=None):
     best_name = "Unknown"
     best_sim  = -1.0
 
+    # ===== BRUTE-FORCE MATCHING =====
     for rec in db_records:
+        # dot product (เร็ว เพราะ normalize แล้ว)
         sim = float(np.dot(query_vector, rec["vector"]))
         if sim > best_sim:
             best_sim  = sim
             best_name = rec["name"]
 
+    # ===== THRESHOLD CHECK =====
     if best_sim < THRESHOLD:
         return "Unknown", best_sim
 
     return best_name, best_sim
-
-
 # ─── ตัวอย่างการลงทะเบียน (รันตรงๆ) ─────────────────────────────────────────
 if __name__ == "__main__":
     import sys

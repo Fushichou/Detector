@@ -1,91 +1,95 @@
 """
-main.py — Face Recognition System (Optimized for low-end hardware)
+main.py - Real-time human + face recognition.
 
-3 threads แยกกัน ไม่ block กัน:
-  Thread 1 (camera)  : อ่านกล้องเร็วที่สุด ไม่รอใคร
-  Thread 2 (detect)  : YOLO + Haar + Embedding ทำงานหลังบ้าน
-  Main thread (GUI)  : แสดงผลลื่นตลอด ใช้ผลเดิมระหว่างรอ
+โครงสร้างหลัก:
+1. camera_thread อ่านเฟรมล่าสุดตลอดเวลา เพื่อลด latency จาก buffer กล้อง
+2. detect_thread ทำงานหนัก เช่น YOLO, Haar face, embedding แยกจาก GUI
+3. Tkinter main thread แสดงผลจาก state ล่าสุด จึงไม่ค้างระหว่าง inference
 """
 
-import cv2
-import time
 import threading
-import copy
+import time
+import cv2
 from camera import open_camera
+from detect_face import crop_face_fixed, detect_face
 from detecthuman import detect_human
-from detect_face import detect_face, crop_face_fixed
+from face_db import find_match, init_db, load_all
 from face_embedding import get_embedding
-from face_db import init_db, load_all, find_match
 from gui import FaceRecognitionGUI
 
-# ─── CONFIG ───────────────────────────────────────────────────────────────────
-ALPHA     = 0.35
+
+# ปรับค่านี้ได้ถ้าเครื่องช้า/เร็วต่างกัน
+ALPHA = 0.35
 FACE_SIZE = 112
+GUI_INTERVAL_MS = 33          # ประมาณ 30 FPS สำหรับ GUI
+FACE_SCAN_INTERVAL = 0.25     # ตรวจหน้าไม่ถี่เกินไป ลดงาน Haar
+EMBED_INTERVAL = 1.00         # สร้าง embedding ต่อคนไม่เกิน 1 ครั้ง/วินาที
 
-GREEN  = (0, 220, 80)
-BLUE   = (255, 160, 50)
-YELLOW = (0, 210, 255)
-BLACK  = (0, 0, 0)
+GREEN = (0, 220, 80)
+BLUE = (255, 160, 50)
+BLACK = (0, 0, 0)
 
-
-# ─── EMA TRACKING ─────────────────────────────────────────────────────────────
 def ema_match(smooth_boxes, humans, alpha=ALPHA, dist_thresh=150):
+    #จับคู่กล่องคนเฟรมใหม่กับกล่องเดิม แล้ว smooth เพื่อลดอาการกรอบสั่น.
     new_smooth = []
     used = set()
+
     for human in humans:
         x1, y1, x2, y2 = human["box"]
         cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
         best_j, best_dist = None, float("inf")
-        for j, sb in enumerate(smooth_boxes):
+
+        for j, old in enumerate(smooth_boxes):
             if j in used:
                 continue
-            scx = (sb["box"][0] + sb["box"][2]) / 2
-            scy = (sb["box"][1] + sb["box"][3]) / 2
-            d = ((cx - scx)**2 + (cy - scy)**2) ** 0.5
-            if d < best_dist:
-                best_dist, best_j = d, j
+            ox1, oy1, ox2, oy2 = old["box"]
+            ocx, ocy = (ox1 + ox2) / 2, (oy1 + oy2) / 2
+            dist = ((cx - ocx) ** 2 + (cy - ocy) ** 2) ** 0.5
+            if dist < best_dist:
+                best_j, best_dist = j, dist
 
         if best_j is not None and best_dist < dist_thresh:
-            sb = smooth_boxes[best_j]
+            old = smooth_boxes[best_j]
             used.add(best_j)
-            ox1, oy1, ox2, oy2 = sb["box"]
-            new_smooth.append({
+            ox1, oy1, ox2, oy2 = old["box"]
+            item = old.copy()
+            item.update({
                 "box": (
                     ox1 + alpha * (x1 - ox1),
                     oy1 + alpha * (y1 - oy1),
                     ox2 + alpha * (x2 - ox2),
                     oy2 + alpha * (y2 - oy2),
                 ),
-                "conf":     human["conf"],
-                "identity": sb.get("identity", "..."),
-                "sim":      sb.get("sim", 0.0),
-                "found":    sb.get("found", False),
-                "face_box": sb.get("face_box", None),
-                "face_img": sb.get("face_img", None),
+                "conf": human["conf"],
             })
         else:
-            new_smooth.append({
-                "box":      (float(x1), float(y1), float(x2), float(y2)),
-                "conf":     human["conf"],
+            item = {
+                "box": (float(x1), float(y1), float(x2), float(y2)),
+                "conf": human["conf"],
                 "identity": "...",
-                "sim":      0.0,
-                "found":    False,
+                "sim": 0.0,
+                "found": False,
                 "face_box": None,
                 "face_img": None,
-            })
+                "last_face_ts": 0.0,
+                "last_embed_ts": 0.0,
+            }
+
+        new_smooth.append(item)
+
     return new_smooth
 
 
-# ─── DRAW OVERLAY ─────────────────────────────────────────────────── ──────────
-def draw_overlay(frame, tracked, fps):
-    h, w = frame.shape[:2]
+def draw_overlay(frame, tracked):
+    #วาดกรอบคน/หน้า/ชื่อ ลงบนเฟรมที่ส่งมา.
+    h = frame.shape[0]
 
     for t in tracked:
         x1, y1, x2, y2 = map(int, t["box"])
-        identity = t["identity"]
-        sim      = t["sim"]
-        found    = t["found"]
-        face_box = t["face_box"]
+        identity = t.get("identity", "...")
+        sim = t.get("sim", 0.0)
+        found = t.get("found", False)
+        face_box = t.get("face_box")
 
         color = (180, 180, 180) if identity == "..." else (GREEN if found else (0, 80, 220))
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
@@ -94,164 +98,194 @@ def draw_overlay(frame, tracked, fps):
         lw, lh = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)[0]
         ly = max(y1 - 6, lh + 6)
         cv2.rectangle(frame, (x1, ly - lh - 4), (x1 + lw + 8, ly + 2), color, -1)
-        cv2.putText(frame, label, (x1 + 4, ly),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, BLACK, 1)
+        cv2.putText(frame, label, (x1 + 4, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.55, BLACK, 1)
 
         if face_box:
             fx, fy, fw, fh = face_box
             cv2.rectangle(frame, (fx, fy), (fx + fw, fy + fh), BLUE, 2)
-            cs = 8
-            for px, py, dx, dy in [
-                (fx, fy, 1, 1), (fx+fw, fy, -1, 1),
-                (fx, fy+fh, 1, -1), (fx+fw, fy+fh, -1, -1)
-            ]:
-                cv2.line(frame, (px, py), (px + dx*cs, py), BLUE, 2)
-                cv2.line(frame, (px, py), (px, py + dy*cs), BLUE, 2)
-
-    cv2.putText(frame, "Q=Quit  R=Reload DB", (10, h - 10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (130, 130, 130), 1)
     return frame
 
 
-# ─── MAIN ─────────────────────────────────────────────────────────────────────
 def main():
+    """
+    ARCHITECTURE โหลด YOLO + face detector + embedding model ครั้งเดียวตอน init
+    จากนั้นแยก 3 threads:
+    1. camera_thread: อ่านเฟรมล่าสุด ลด buffer latency
+    2. detect_thread: ทำ YOLO + Haar + embedding โดยไม่บล็อก GUI
+    3. GUI thread (main): Tkinter render 30 FPS จาก state ล่าสุด
+    """
     init_db()
     db_records = load_all()
-    print(f"[DB] โหลด {len(db_records)} ใบหน้า")
+    print(f"[DB] Loaded {len(db_records)} faces")
 
     cap = open_camera()
+    stop_event = threading.Event()
+    state_lock = threading.Lock()
+    db_lock = threading.Lock()
+    latest_frame = {"value": None}
+    tracked_state = {"value": []}
 
-    # ── shared state (thread-safe ด้วย lock) ──────────────────────────────────
-    lock          = threading.Lock()
-    latest_frame  = [None]   # เฟรมล่าสุดจากกล้อง
-    tracked_state = [[]]     # ผลลัพธ์ล่าสุดจาก detect thread
-    stop_flag     = [False]
-
-    # ── Thread 1: อ่านกล้อง ───────────────────────────────────────────────────
     def camera_thread():
-        while not stop_flag[0]:
+        """
+        CAMERA THREAD: อ่านเฟรมล่าสุดจากกล้องตลอดเวลา
+        - ไม่ใช้ queue หรือ buffer เพื่อลด latency
+        - ทิ้งเฟรมเก่า ให้ detect_thread ใช้เฟรมล่าสุดเท่านั้น
+        - sleep 0.01s เมื่อ camera ล้มเหลว (USB disconnect ฯลฯ)
+        """
+        while not stop_event.is_set():
             ret, frame = cap.read()
             if not ret:
                 time.sleep(0.01)
                 continue
-            with lock:
-                latest_frame[0] = frame   # แค่เก็บเฟรมล่าสุด ไม่ queue
+            with state_lock:
+                latest_frame["value"] = frame  # Overwrite เฟรมเก่า
         cap.release()
 
-    # ── Thread 2: detect + recognize (หนัก ทำหลังบ้าน) ─────────────────────
     def detect_thread():
+        """
+        DETECT THREAD: ทำ inference หนัก (YOLO, Haar, DeepFace)
+        
+        Pipeline:
+        1. YOLO detect human คน: ปรับ confidence + IoU ให้ balance
+        2. EMA match: จับคู่ box กับ track เดิม สร้าง smooth effect
+        3. Haar face: สแกนเป็นช่วง (0.25s) เพื่อลดเพิ่มภาระ
+        4. DeepFace embedding: ความถี่ 1s/คน เพื่อหลีกเลี่ยง GPU saturate
+        5. find_match: ค้นหาชื่อในฐานข้อมูลด้วย cosine similarity
+        
+        ทำงานแยกจาก GUI → GUI ไม่ค้างระหว่าง inference
+        """
         nonlocal db_records
         tracked = []
-        last_frame_id = id(None)
+        last_frame_obj = None
 
-        while not stop_flag[0]:
-            with lock:
-                frame = latest_frame[0]
+        while not stop_event.is_set():
+            with state_lock:
+                frame = latest_frame["value"]
 
-            if frame is None or id(frame) == last_frame_id:
-                time.sleep(0.01)   # รอเฟรมใหม่
+            # ข้ามไปถ้า frame ยังไม่ได้อัปเดต หรือ frame เดิม
+            if frame is None or frame is last_frame_obj:
+                time.sleep(0.005)
                 continue
 
-            last_frame_id = id(frame)
-            f = frame.copy()
+            last_frame_obj = frame
+            work = frame.copy()  # Copy เพื่อใช้ในฟังก์ชั่นแบบ stateless
+            now = time.perf_counter()
 
-            # YOLO detect คน
-            humans  = detect_human(f)
+            # ============ YOLO Detection ============
+            # Detect ทุกเฟรม เพราะ YOLO เร็ว + ต้องติดตาม smooth
+            humans = detect_human(work)
+            # EMA smooth: ลด jitter ของ bounding box
             tracked = ema_match(tracked, humans)
 
-            # Haar + Embedding บน ROI
-            for t in tracked:
-                x1, y1, x2, y2 = map(int, t["box"])
-                roi = f[y1:y2, x1:x2]
+            # ============ Per-Person Processing ============
+            for person in tracked:
+                x1, y1, x2, y2 = map(int, person["box"])
+                roi = work[y1:y2, x1:x2]  # Crop ROI ของคนๆ นั้น
                 if roi.size == 0:
                     continue
 
-                faces = detect_face(roi)
-                if not faces:
-                    t["face_box"] = None
-                    t["face_img"] = None
-                    continue
+                # --- HAAR Face Scan (ช่วง 0.25s) ---
+                # Haar เป็น lightweight แต่ต้อง scan ROI ทั้งหมด
+                # ลด frequency ลงจาก FPS เป็น 4/วินาที
+                if now - person.get("last_face_ts", 0.0) >= FACE_SCAN_INTERVAL:
+                    person["last_face_ts"] = now
+                    faces = detect_face(roi)  # Haar cascade
+                    if faces:
+                        # เลือก face ที่ใหญ่ที่สุด (ปกติจะเป็นหน้าตรง)
+                        fx, fy, fw, fh = max(faces, key=lambda fc: fc[2] * fc[3])
+                        person["face_box"] = (fx + x1, fy + y1, fw, fh)
+                        person["face_img"] = crop_face_fixed(roi, fx, fy, fw, fh, FACE_SIZE)
+                    else:
+                        person["face_box"] = None
+                        person["face_img"] = None
 
-                fx, fy, fw, fh = max(faces, key=lambda fc: fc[2] * fc[3])
-                t["face_box"] = (fx + x1, fy + y1, fw, fh)
+                # --- DeepFace Embedding (ช่วง 1.0s) ---
+                # DeepFace (GPU) หนักสุด ถ้า embed ทุกเฟรม GPU จะ saturate
+                if person.get("face_img") is None:
+                    continue  # ยังไม่หา face ให้ skip
+                if now - person.get("last_embed_ts", 0.0) < EMBED_INTERVAL:
+                    continue  # โปรดปรานเวลา ยังไม่ถึง interval
 
-                face_img = crop_face_fixed(roi, fx, fy, fw, fh, FACE_SIZE)
-                t["face_img"] = face_img
-
-                emb = get_embedding(face_img)
+                person["last_embed_ts"] = now
+                emb = get_embedding(person["face_img"])  # DeepFace
                 if emb is None:
                     continue
 
-                name, sim = find_match(emb, db_records)
-                t["identity"] = name
-                t["sim"]      = sim
-                t["found"]    = (name != "Unknown")
+                # ค้นหาชื่อในฐานข้อมูล
+                with db_lock:
+                    records_snapshot = db_records
+                name, sim = find_match(emb, records_snapshot)
+                person["identity"] = name
+                person["sim"] = sim
+                person["found"] = name != "Unknown"
 
-            # อัปเดต shared state
-            with lock:
-                tracked_state[0] = copy.deepcopy(tracked)
+            # Copy เฉพาะ dict ชั้นเดียว ไม่ deepcopy image numpy array
+            # → ลด memory churn + GC pressure
+            with state_lock:
+                tracked_state["value"] = [item.copy() for item in tracked]
 
-    # ── เริ่ม threads ──────────────────────────────────────────────────────────
     t1 = threading.Thread(target=camera_thread, daemon=True)
-    t2 = threading.Thread(target=detect_thread,  daemon=True)
+    t2 = threading.Thread(target=detect_thread, daemon=True)
     t1.start()
     t2.start()
 
-    # ── GUI loop (main thread) ─────────────────────────────────────────────────
-    gui     = FaceRecognitionGUI(cam_w=640, cam_h=480)
+    gui = FaceRecognitionGUI(cam_w=640, cam_h=480, interval_ms=GUI_INTERVAL_MS)
     fps_buf = []
-    t_prev  = time.perf_counter()
+    t_prev = time.perf_counter()
 
     def loop():
-        nonlocal db_records, t_prev
+        """GUI LOOP: อัปเดต UI 30 FPS โดยใช้ state ล่าสุดจาก threads"""
+        nonlocal t_prev
 
-        with lock:
-            frame   = latest_frame[0]
-            tracked = tracked_state[0]
+        with state_lock:
+            frame = latest_frame["value"]  # เฟรมกล้องล่าสุด
+            tracked = tracked_state["value"]  # ผล detection ล่าสุด
 
         if frame is None:
-            return
+            return  # อยังไม่เริ่มถ่ายภาพ
 
-        # FPS
+        # ===== FPS Counter =====
         t_now = time.perf_counter()
         fps_buf.append(1.0 / max(t_now - t_prev, 1e-6))
         t_prev = t_now
         if len(fps_buf) > 30:
-            fps_buf.pop(0)
+            fps_buf.pop(0)  # Moving average ของ 30 frame
         fps = sum(fps_buf) / len(fps_buf)
 
-        # วาด + ส่ง GUI
-        display = draw_overlay(frame.copy(), tracked, fps)
-        gui.update_camera(display)
-        gui.update_stats(fps, len(tracked))
-        gui.update_faces([
+        # ===== Render & Display =====
+        display = draw_overlay(frame.copy(), tracked)  # วาดกรอบ+ชื่อ
+        gui.update_camera(display)  # Update main canvas
+        gui.update_stats(fps, len(tracked))  # FPS + จำนวนคน
+        gui.update_faces([  # Update thumbnail cards
             {
-                "id":       i,
-                "face_img": t["face_img"],
-                "identity": t["identity"],
-                "sim":      t["sim"],
-                "found":    t["found"],
+                "id": i,
+                "face_img": item.get("face_img"),
+                "identity": item.get("identity", "..."),
+                "sim": item.get("sim", 0.0),
+                "found": item.get("found", False),
             }
-            for i, t in enumerate(tracked)
+            for i, item in enumerate(tracked)
         ])
 
-        # keyboard (ผ่าน cv2 window ไม่ได้เพราะไม่มี imshow → ใช้ bind แทน)
-
     def on_key(event):
+        """KEYBOARD HANDLER: Q=Quit, R=Reload database"""
         nonlocal db_records
-        if event.char == 'q':
-            stop_flag[0] = True
+        key = (event.char or "").lower()
+        if key == "q":
+            # ออกจากโปรแกรม
+            stop_event.set()  # Signal threads ให้หยุด
             gui.destroy()
-        elif event.char == 'r':
-            db_records = load_all()
-            gui.set_status(f"Reload DB: {len(db_records)} ใบหน้า")
-            print(f"[DB] Reload: {len(db_records)} ใบหน้า")
+        elif key == "r":
+            # โหลด DB ใหม่ (เพื่ออัปเดตคนใหม่ที่เพิ่มเข้า DB)
+            fresh = load_all()
+            with db_lock:
+                db_records = fresh
+            gui.set_status(f"Reload DB: {len(fresh)} faces")
+            print(f"[DB] Reload: {len(fresh)} faces")
 
     gui.root.bind("<Key>", on_key)
     gui.run(loop)
-
-    stop_flag[0] = True
-
+    stop_event.set()
 
 if __name__ == "__main__":
     main()
