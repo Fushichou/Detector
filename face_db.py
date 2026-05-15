@@ -7,19 +7,26 @@ face_db.py
   persons(id, name, created_at)
   face_vectors(id, person_id, vector BLOB)
 """
-
 import sqlite3
 import numpy as np
 import io
 import os
 
 DB_PATH = "faces.db"
-THRESHOLD = 0.70  # cosine similarity ต่ำกว่านี้ = Unknown
-
+THRESHOLD = 0.75  # cosine similarity ต่ำกว่านี้ = Unknown
+MATCH_MARGIN = 0.035  # อันดับ 1 ต้องชนะอันดับ 2 อย่างน้อยเท่านี้
+TOP_K_PER_PERSON = 3  # รวมคะแนนจาก vector ที่ดีที่สุดของแต่ละคน
 
 def _connect():
     return sqlite3.connect(DB_PATH)
 
+
+def _normalize_vector(vector: np.ndarray):
+    vec = np.asarray(vector, dtype=np.float32)
+    norm = np.linalg.norm(vec)
+    if norm > 0:
+        vec = vec / norm
+    return vec
 
 def init_db():
     """สร้างตาราง (ถ้ายังไม่มี)"""
@@ -55,6 +62,7 @@ def add_person(name):
 
 def add_vector(person_id, vector: np.ndarray):
     """เพิ่ม embedding vector ของคน"""
+    vector = _normalize_vector(vector)
     buf = io.BytesIO()
     np.save(buf, vector)
     blob = buf.getvalue()
@@ -91,23 +99,25 @@ def load_all():
     """
     con = _connect()
     rows = con.execute("""
-        SELECT p.name, fv.vector
+        SELECT p.id, p.name, fv.vector
         FROM face_vectors fv
         JOIN persons p ON p.id = fv.person_id
     """).fetchall()
     con.close()
 
     records = []
-    for name, blob in rows:
+    for person_id, name, blob in rows:
         buf = io.BytesIO(blob)
         vec = np.load(buf)  # numpy array เก็บ blob
-        records.append({"name": name, "vector": vec})
+        records.append({
+            "person_id": person_id,
+            "name": name,
+            "vector": _normalize_vector(vec),
+        })
 
     return records
 
-
 # ─── ค้นหา ────────────────────────────────────────────────────────────────────
-
 def find_match(query_vector: np.ndarray, db_records=None):
 
     if db_records is None:
@@ -116,22 +126,39 @@ def find_match(query_vector: np.ndarray, db_records=None):
     if not db_records:
         return "Unknown", 0.0
 
-    best_name = "Unknown"
-    best_sim  = -1.0
+    query_vector = _normalize_vector(query_vector)
+    person_scores = {}
 
-    # ===== BRUTE-FORCE MATCHING =====
+    # ===== BRUTE-FORCE VECTOR SCORES =====
     for rec in db_records:
         # dot product (เร็ว เพราะ normalize แล้ว)
         sim = float(np.dot(query_vector, rec["vector"]))
-        if sim > best_sim:
-            best_sim  = sim
-            best_name = rec["name"]
+        key = rec.get("person_id", rec["name"])
+        item = person_scores.setdefault(key, {"name": rec["name"], "scores": []})
+        item["scores"].append(sim)
+
+    ranked = []
+    for item in person_scores.values():
+        scores = sorted(item["scores"], reverse=True)
+        top_scores = scores[:TOP_K_PER_PERSON]
+        best = top_scores[0]
+        top_mean = float(np.mean(top_scores))
+        # Blend max and mean so one very good sample wins, but repeated good samples help.
+        score = (best * 0.75) + (top_mean * 0.25)
+        ranked.append({"name": item["name"], "score": score, "best": best})
+
+    ranked.sort(key=lambda item: item["score"], reverse=True)
+    best_match = ranked[0]
+    second_score = ranked[1]["score"] if len(ranked) > 1 else -1.0
 
     # ===== THRESHOLD CHECK =====
-    if best_sim < THRESHOLD:
-        return "Unknown", best_sim
+    if best_match["score"] < THRESHOLD:
+        return "Unknown", best_match["score"]
 
-    return best_name, best_sim
+    if best_match["score"] - second_score < MATCH_MARGIN:
+        return "Unknown", best_match["score"]
+
+    return best_match["name"], best_match["score"]
 # ─── ตัวอย่างการลงทะเบียน (รันตรงๆ) ─────────────────────────────────────────
 if __name__ == "__main__":
     import sys
@@ -173,7 +200,7 @@ if __name__ == "__main__":
                     keypoints=face.get("keypoints"),
                     return_aligned=True,
                 )
-                emb = get_embedding(face_img, aligned=face_aligned)
+                emb = get_embedding(face_img, aligned=face_aligned, augment=True)
                 if emb is None:
                     print("ไม่สามารถสร้าง embedding ได้")
                     continue

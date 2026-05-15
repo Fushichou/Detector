@@ -7,7 +7,7 @@ import os
 import math
 import numpy as np
 
-# ── โหลด model file ────────────────────────────────────────────────────────────
+# โหลด model file 
 MODEL_PATH = "blaze_face_short_range.tflite"
 
 def _ensure_model():
@@ -17,7 +17,7 @@ def _ensure_model():
         urllib.request.urlretrieve(url, MODEL_PATH)
         print("[FaceDetect] ดาวน์โหลดเสร็จแล้ว")
 
-# ── Lazy load detector ─────────────────────────────────────────────────────────
+# Lazy load detector 
 _detector = None
 
 def _get_detector():
@@ -137,9 +137,8 @@ def _crop_aligned_by_eyes(frame, fx, fy, fw, fh, keypoints, size):
 
     return cv2.resize(face_crop, (size, size), interpolation=cv2.INTER_AREA)
 
-
 def crop_face_fixed(frame, fx, fy, fw, fh, size=112, keypoints=None, return_aligned=False):
-    """Crop ใบหน้าพร้อม padding แล้ว resize เป็น size×size สำหรับ embedding"""
+    """Crop ใบหน้าพร้อม padding แล้ว resize เป็น sizeXsize สำหรับ embedding"""
     aligned = _crop_aligned_by_eyes(frame, fx, fy, fw, fh, keypoints, size)
     if aligned is not None:
         return (aligned, True) if return_aligned else aligned

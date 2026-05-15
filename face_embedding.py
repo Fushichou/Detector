@@ -11,6 +11,14 @@ def _normalize_embedding(result):
         vec = vec / norm
     return vec
 
+
+def _normalize_vector(vec):
+    vec = np.asarray(vec, dtype=np.float32)
+    norm = np.linalg.norm(vec)
+    if norm > 0:
+        vec = vec / norm
+    return vec
+
 def _get_model():
     """LAZY LOAD + WARM-UP"""
     global _model
@@ -30,42 +38,50 @@ def _get_model():
         _model = DeepFace
     return _model
 
-def get_embedding(face_img, aligned=False):
+# แก้ไขใน face_embedding.py
+
+def _represent_rgb(DeepFace, rgb, aligned=False):
+    if aligned:
+        return DeepFace.represent(
+            rgb,
+            model_name="ArcFace",
+            enforce_detection=False,
+            detector_backend="skip",
+            align=False
+        )
+
+    return DeepFace.represent(
+        rgb,
+        model_name="ArcFace",
+        enforce_detection=False,
+        detector_backend="opencv",
+        align=True
+    )
+
+
+def get_embedding(face_img, aligned=False, augment=False):
     """
-    สร้าง EMBEDDING จากภาพใบหน้าด้วย ArcFace + Face Alignment
+    สร้าง EMBEDDING จากภาพใบหน้า
+    Optimization: ถ้าส่งภาพที่ Aligned มาแล้ว จะข้ามขั้นตอนตรวจจับซ้ำภายใน DeepFace
     """
     if face_img is None or face_img.size == 0:
         return None
 
     try:
         DeepFace = _get_model()
+        # แปลงเป็น RGB สำหรับ DeepFace
         rgb = cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB)
 
-        if aligned:
-            try:
-                result = DeepFace.represent(
-                    rgb,
-                    model_name="ArcFace",
-                    enforce_detection=False,
-                    detector_backend="skip",
-                    align=False,
-                )
-                return _normalize_embedding(result)
-            except Exception:
-                pass
+        embeddings = [_normalize_embedding(_represent_rgb(DeepFace, rgb, aligned))]
 
-        result = DeepFace.represent(
-            rgb,
-            model_name="ArcFace",        # เปลี่ยนเป็น ArcFace (แม่นยำกว่า)
-            enforce_detection=False,     
-            detector_backend="opencv",   # fallback: ให้ DeepFace align เองเมื่อ MediaPipe align ไม่พอ
-            align=True                   # สำคัญมาก! บังคับดัดหน้าตรงก่อน Extract Feature
-        )
+        if augment:
+            flipped = cv2.flip(rgb, 1)
+            embeddings.append(_normalize_embedding(_represent_rgb(DeepFace, flipped, aligned)))
 
-        return _normalize_embedding(result)
+        return _normalize_vector(np.mean(embeddings, axis=0))
 
     except Exception as e:
-        # หากมุมกล้องแย่เกินกว่าจะหา Landmark ได้ ให้ข้ามไป ไม่ต้อง print ให้รก console
+        # กรณีภาพมี noise มากจนทำ embedding ไม่ได้
         return None
 
 def cosine_similarity(v1, v2):

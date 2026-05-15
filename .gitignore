@@ -22,6 +22,9 @@ blaze_face_short_range.tflite
 __pycache__/
 *.pyc
 
+# generated detection outputs
+outputs/
+
 # model
 *.pt
 *.onnx

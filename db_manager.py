@@ -11,7 +11,6 @@ import cv2
 import threading
 import time
 from PIL import Image, ImageTk
-
 from camera import open_camera
 from detect_face import detect_face, crop_face_fixed
 from face_embedding import get_embedding
@@ -220,6 +219,7 @@ class CaptureWindow:
                 emb = get_embedding(
                     sample["image"],
                     aligned=sample.get("aligned", False),
+                    augment=True,
                 )
                 if emb is not None:
                     add_vector(pid, emb)
@@ -448,6 +448,7 @@ class DBManager:
                     emb = get_embedding(
                         sample["image"],
                         aligned=sample.get("aligned", False),
+                        augment=True,
                     )
                     if emb is not None:
                         add_vector(person_id, emb)
