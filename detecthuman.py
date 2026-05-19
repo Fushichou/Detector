@@ -1,62 +1,101 @@
-from ultralytics import YOLO
 import cv2
+from pathlib import Path
+from ultralytics import YOLO
+from runtime_config import YOLO_IMG_SIZE, YOLO_MAX_DET
 
-IMG_SIZE = 416
-MIN_W = 30
-MIN_H = 50
+IMG_SIZE    = YOLO_IMG_SIZE
+PERSON_CONF = 0.70
+NMS_IOU     = 0.5
+MAX_DET     = YOLO_MAX_DET
+MIN_W       = 30
+MIN_H       = 50
 
-# โหลดและ fuse model ครั้งเดียว STARTUP เพื่อลดเวลา inference รอบถัดไป
-# fuse(): รวม BN layers → fewer ops + ขนาด model เล็กลง
-model = YOLO("yolo11n.pt")  # nano-sized: ความเร็ว > ความแม่นยำ
-model.fuse()
+YOLO_MODEL_PATH = Path("YOLOv11-Detection.tflite")
+if not YOLO_MODEL_PATH.exists():
+    YOLO_MODEL_PATH = Path("yolov11n.pt")
+
+try:
+    import torch
+except Exception:
+    torch = None
+
+USE_HALF = bool(torch is not None and torch.cuda.is_available())
+
+_model = None
+
+def _get_model():
+    global _model
+    if _model is None:
+        _model = YOLO(YOLO_MODEL_PATH)
+        if YOLO_MODEL_PATH.suffix == ".pt":
+            _model.fuse()
+    return _model
+
+
+def _letterbox(frame, size=IMG_SIZE):
+    """Resize with padding so YOLO sees a square image without aspect distortion."""
+    h, w = frame.shape[:2]
+    if h <= 0 or w <= 0:
+        return None, 1.0, 0, 0
+
+    scale = min(size / w, size / h)
+    new_w = max(1, int(round(w * scale)))
+    new_h = max(1, int(round(h * scale)))
+
+    interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+    resized = cv2.resize(frame, (new_w, new_h), interpolation=interp)
+
+    pad_x = (size - new_w) // 2
+    pad_y = (size - new_h) // 2
+    padded = cv2.copyMakeBorder(
+        resized,
+        pad_y, size - new_h - pad_y,
+        pad_x, size - new_w - pad_x,
+        cv2.BORDER_CONSTANT,
+        value=(114, 114, 114),
+    )
+    return padded, scale, pad_x, pad_y
 
 def detect_human(frame):
     """
-    YOLO11n detection: ตรวจจับคนจากเฟรมภาพ
-    
+    ตรวจจับคนจากเฟรมภาพด้วย YOLO11n
+
     Pipeline:
-    1. Resize frame → 416x416 (ลด inference time 4x vs 640x640)
-    2. Run YOLO inference (classes=[0] = 'person' only)
-    3. Scale back coordinates → frame size
-    4. Filter: บุคคลต้องขนาดต่ำสุด MIN_W x MIN_H (remove noise)
-    
-    Returns: list of {"box": (x1,y1,x2,y2), "conf": 0-1}
+      1. Letterbox frame → IMG_SIZE×IMG_SIZE โดยไม่บิด aspect ratio
+      2. Run YOLO inference (classes=[0] = person only)
+      3. Scale coordinates กลับขนาดเฟรมจริง
+      4. Filter ขนาดขั้นต่ำ MIN_W × MIN_H
+
+    Returns: list of {"box": (x1, y1, x2, y2), "conf": float}
     """
-    # RESIZE: ลดความ resolution ก่อน → เร็ว  20ms → 5ms
-    small = cv2.resize(frame, (IMG_SIZE, IMG_SIZE), interpolation=cv2.INTER_AREA)
-    
-    # YOLO INFERENCE: ส่งเฟรมเล็กเข้า model
-    # conf=0.80: ลด false positive
-    # iou=0.5: tight NMS → นับเป็นบุคคลต่างกัน
-    # classes=[0]: ตรวจจับแค่ 'person' (skip ไอเทม อื่นๆ)
-    # half=False: ใช้ FP32 (เสถียรกว่า เมื่อไม่ต้องการ FP16)
-    # max_det=20: max 20 คนต่อเฟรม
-    results = model(
+    if frame is None or frame.size == 0:
+        return []
+
+    small, scale, pad_x, pad_y = _letterbox(frame)
+    if small is None:
+        return []
+
+    results = _get_model()( 
         small,
         imgsz=IMG_SIZE,
-        conf=0.80,
-        iou=0.5,
+        conf=PERSON_CONF,
+        iou=NMS_IOU,
         classes=[0],
+        max_det=MAX_DET,
         verbose=False,
-        half=False,
+        half=USE_HALF if YOLO_MODEL_PATH.suffix == ".pt" else False,
     )
 
     h, w = frame.shape[:2]
-    sx = w / IMG_SIZE  # scale x: small → frame
-    sy = h / IMG_SIZE  # scale y: small → frame
-
     detections = []
     for r in results:
         for box in r.boxes:
             conf = float(box.conf[0])
-            # xyxy: x1, y1, x2, y2 (ใน 320x320 coordinates)
             x1, y1, x2, y2 = box.xyxy[0].tolist()
-            # SCALE BACK: ทำให้เป็นขนาดเฟรมจริง
-            x1 = max(0, int(x1 * sx))
-            y1 = max(0, int(y1 * sy))
-            x2 = min(w, int(x2 * sx))
-            y2 = min(h, int(y2 * sy))
-            # FILTER: บุคคล ต้องมีขนาดขั้นต่ำ
+            x1 = max(0, int((x1 - pad_x) / scale))
+            y1 = max(0, int((y1 - pad_y) / scale))
+            x2 = min(w, int((x2 - pad_x) / scale))
+            y2 = min(h, int((y2 - pad_y) / scale))
             if (x2 - x1) < MIN_W or (y2 - y1) < MIN_H:
                 continue
             detections.append({"box": (x1, y1, x2, y2), "conf": conf})

@@ -2,22 +2,23 @@ import cv2
 import mediapipe as mp
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision
-import urllib.request
 import os
 import math
 import numpy as np
-
-# โหลด model file 
+# ── โหลด model file ────────────────────────────────────────────────────────────
 MODEL_PATH = "blaze_face_short_range.tflite"
+MIN_FACE_INPUT = 40
+MIN_FACE_SIZE = 20
+MAX_DETECT_DIM = 384
 
 def _ensure_model():
-    if not os.path.exists(MODEL_PATH):
-        print("[FaceDetect] กำลังดาวน์โหลด MediaPipe model...")
-        url = "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite"
-        urllib.request.urlretrieve(url, MODEL_PATH)
-        print("[FaceDetect] ดาวน์โหลดเสร็จแล้ว")
-
-# Lazy load detector 
+    if os.path.exists(MODEL_PATH):
+        return
+    raise FileNotFoundError(
+        f"Missing face detector model: {MODEL_PATH}. "
+        "Place blaze_face_short_range.tflite in the project folder before running."
+    )
+# ── Lazy load detector ─────────────────────────────────────────────────────────
 _detector = None
 
 def _get_detector():
@@ -27,11 +28,10 @@ def _get_detector():
         base_options = mp_python.BaseOptions(model_asset_path=MODEL_PATH)
         options = vision.FaceDetectorOptions(
             base_options=base_options,
-            min_detection_confidence=0.6
+            min_detection_confidence=0.55
         )
         _detector = vision.FaceDetector.create_from_options(options)
     return _detector
-
 
 def _keypoints_to_pixels(det, width, height):
     keypoints = []
@@ -44,6 +44,19 @@ def _keypoints_to_pixels(det, width, height):
         keypoints.append((x, y))
     return keypoints
 
+def _resize_for_detection(roi):
+    h, w = roi.shape[:2]
+    max_dim = max(h, w)
+    if max_dim <= MAX_DETECT_DIM:
+        return roi, 1.0
+
+    scale = MAX_DETECT_DIM / max_dim
+    resized = cv2.resize(
+        roi,
+        (max(1, int(round(w * scale))), max(1, int(round(h * scale)))),
+        interpolation=cv2.INTER_AREA,
+    )
+    return resized, scale
 
 def detect_face(roi, with_keypoints=False):
     """
@@ -55,7 +68,12 @@ def detect_face(roi, with_keypoints=False):
         return []
 
     h, w = roi.shape[:2]
-    rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
+    if h < MIN_FACE_INPUT or w < MIN_FACE_INPUT:
+        return []
+
+    work, scale = _resize_for_detection(roi)
+    work_h, work_w = work.shape[:2]
+    rgb = cv2.cvtColor(work, cv2.COLOR_BGR2RGB)
     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
 
     results = _get_detector().detect(mp_image)
@@ -66,25 +84,29 @@ def detect_face(roi, with_keypoints=False):
     faces = []
     for det in results.detections:
         bb = det.bounding_box
-        x1 = max(0, bb.origin_x)
-        y1 = max(0, bb.origin_y)
-        bw = bb.width
-        bh = bb.height
+        x1 = max(0, int(bb.origin_x / scale))
+        y1 = max(0, int(bb.origin_y / scale))
+        x2 = min(w, int((bb.origin_x + bb.width) / scale))
+        y2 = min(h, int((bb.origin_y + bb.height) / scale))
+        bw = x2 - x1
+        bh = y2 - y1
 
-        if bw < 20 or bh < 20:
+        if bw < MIN_FACE_SIZE or bh < MIN_FACE_SIZE:
             continue
 
         box = (x1, y1, bw, bh)
         if with_keypoints:
+            keypoints = _keypoints_to_pixels(det, work_w, work_h)
+            if scale != 1.0:
+                keypoints = [(x / scale, y / scale) for x, y in keypoints]
             faces.append({
                 "box": box,
-                "keypoints": _keypoints_to_pixels(det, w, h),
+                "keypoints": keypoints,
             })
         else:
             faces.append(box)
 
     return faces
-
 
 def _crop_aligned_by_eyes(frame, fx, fy, fw, fh, keypoints, size):
     if not keypoints or len(keypoints) < 2:
@@ -138,7 +160,7 @@ def _crop_aligned_by_eyes(frame, fx, fy, fw, fh, keypoints, size):
     return cv2.resize(face_crop, (size, size), interpolation=cv2.INTER_AREA)
 
 def crop_face_fixed(frame, fx, fy, fw, fh, size=112, keypoints=None, return_aligned=False):
-    """Crop ใบหน้าพร้อม padding แล้ว resize เป็น sizeXsize สำหรับ embedding"""
+    """Crop ใบหน้าพร้อม padding แล้ว resize เป็น size×size สำหรับ embedding"""
     aligned = _crop_aligned_by_eyes(frame, fx, fy, fw, fh, keypoints, size)
     if aligned is not None:
         return (aligned, True) if return_aligned else aligned

@@ -28,6 +28,9 @@ outputs/
 # model
 *.pt
 *.onnx
+*.tflite
+face_db-shm
+face_db-wal
 
 # vscode
 .vscode/
