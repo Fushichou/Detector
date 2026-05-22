@@ -1,0 +1,7 @@
+_pycache_
+Include/
+Scripts/
+Lib/
+share/
+face.db
+*pyc
