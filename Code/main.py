@@ -2,6 +2,7 @@ import queue
 import threading
 import time
 import cv2
+from collections import deque
 from camera import ask_video_source, open_camera
 from detect_face import crop_face_fixed, detect_face
 from detecthuman import detect_human
@@ -166,12 +167,20 @@ def draw_overlay(frame, tracked):
 
     return frame
 
-def face_quality_ok(face_img, face_w, face_h) -> bool:
+def face_quality_ok(face_img, face_w, face_h, roi_crop=None) -> bool:
+    """
+    ตรวจสอบคุณภาพใบหน้า
+    roi_crop: ภาพใบหน้าจาก ROI ก่อน resize — ใช้คำนวณ sharpness ที่ความละเอียดเต็ม
+    ถ้าไม่มี roi_crop จะ fallback เป็น face_img (112×112)
+    """
     if face_img is None:
         return False
     if min(face_w, face_h) < MIN_RECOGNITION_FACE_PX:
         return False
-    gray      = cv2.cvtColor(face_img, cv2.COLOR_BGR2GRAY)
+    # คำนวณ sharpness บนภาพความละเอียดสูงสุดที่มี
+    # ถ้าหน้าเล็ก (เช่น 40px) แล้ว upsample ไป 112 ก่อน blur จะเสียข้อมูล
+    src = roi_crop if (roi_crop is not None and roi_crop.size > 0) else face_img
+    gray      = cv2.cvtColor(src, cv2.COLOR_BGR2GRAY)
     sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
     return sharpness >= MIN_FACE_SHARPNESS
 
@@ -260,6 +269,35 @@ def main():
     print(f"[Config] profile={PROFILE} camera={CAMERA_WIDTH}x{CAMERA_HEIGHT}@{CAMERA_FPS}")
     print(f"[DB] Loaded {len(db_records)} faces")
 
+    # โหลดทุก model ล่วงหน้าใน background thread ก่อนคนแรกเดินเข้ากล้อง
+    # ArcFace ~2-3s, YOLO ~1s, MediaPipe ~0.5s — ทำพร้อมกันใน thread แยก
+    def _prewarm_embedding():
+        from face_embedding import _get_model
+        try:
+            _get_model()
+            print("[Init] ArcFace model ready")
+        except Exception as e:
+            print(f"[Init] ArcFace pre-warm failed: {e}")
+
+    def _prewarm_yolo():
+        from detecthuman import _get_model as yolo_get
+        try:
+            yolo_get()
+            print("[Init] YOLO model ready")
+        except Exception as e:
+            print(f"[Init] YOLO pre-warm failed: {e}")
+
+    def _prewarm_mediapipe():
+        from detect_face import _get_detector
+        try:
+            _get_detector()
+            print("[Init] MediaPipe detector ready")
+        except Exception as e:
+            print(f"[Init] MediaPipe pre-warm failed: {e}")
+
+    for _fn in (_prewarm_embedding, _prewarm_yolo, _prewarm_mediapipe):
+        threading.Thread(target=_fn, daemon=True).start()
+
     video_path = ask_video_source()
     if video_path:
         print(f"[Source] ใช้ไฟล์วิดีโอ: {video_path}")
@@ -328,10 +366,11 @@ def main():
             if now - last_detect_ts < HUMAN_DETECT_INTERVAL:
                 continue
             last_detect_ts = now
-            work = frame.copy()
-            frame_h, frame_w = work.shape[:2]
+            # ไม่ต้อง copy frame — detect_human / detect_face ไม่ mutate ภาพ
+            # camera_thread แค่สลับ reference ใน latest_frame["value"] ไม่แก้ข้อมูล array เก่า
+            frame_h, frame_w = frame.shape[:2]
             try:
-                humans = detect_human(work)
+                humans = detect_human(frame)
             except Exception as exc:
                 print(f"[Detect] human detection failed: {exc}")
                 time.sleep(0.2)
@@ -348,7 +387,7 @@ def main():
                 if box is None:
                     continue
                 x1, y1, x2, y2 = box
-                roi = work[y1:y2, x1:x2]
+                roi = frame[y1:y2, x1:x2]
                 if roi.size == 0:
                     continue
                 face_scan_interval = (
@@ -377,7 +416,9 @@ def main():
                             keypoints=face.get("keypoints"),
                             return_aligned=True,
                         )
-                        if face_quality_ok(face_img, fw, fh):
+                        # sharpness บน roi ดิบก่อน resize — ถูกต้องกว่าการเช็คบน 112×112
+                        raw_face = roi[fy:fy + fh, fx:fx + fw]
+                        if face_quality_ok(face_img, fw, fh, roi_crop=raw_face if raw_face.size > 0 else None):
                             person["face_img"]     = face_img
                             person["face_aligned"] = face_aligned
                         else:
@@ -421,7 +462,7 @@ def main():
     print(f"[Source] resolution จริง: {actual_w}x{actual_h}")
 
     gui = FaceRecognitionGUI(cam_w=actual_w, cam_h=actual_h, interval_ms=GUI_INTERVAL_MS)
-    fps_buf = []
+    fps_buf = deque(maxlen=30)   # deque O(1) append/discard vs list.pop(0) O(n)
     t_prev  = time.perf_counter()
 
     def loop():
@@ -435,8 +476,6 @@ def main():
         t_now = time.perf_counter()
         fps_buf.append(1.0 / max(t_now - t_prev, 1e-6))
         t_prev = t_now
-        if len(fps_buf) > 30:
-            fps_buf.pop(0)
         fps = sum(fps_buf) / len(fps_buf)
 
         display = draw_overlay(frame.copy(), tracked)

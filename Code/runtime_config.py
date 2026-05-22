@@ -44,15 +44,33 @@ PROFILES = {
         "yolo_img_size": 416,
         "yolo_max_det": 20,
         "gui_interval_ms": 33,
-        "human_detect_interval": 0.08,
-        "max_recognition_tracks": 5,
+        "human_detect_interval": 0.07,   # เร็วขึ้น: 80ms → 70ms
+        "max_recognition_tracks": 6,     # เพิ่มจาก 5 → 6
         "max_pending_recognition": 2,
-        "min_recognition_face_px": 32,
-        "min_face_sharpness": 15.0,
-        "face_scan_unknown": 0.30,
-        "face_scan_known": 0.80,
-        "embed_unknown": 1.00,
-        "embed_known": 2.50,
+        "min_recognition_face_px": 30,   # ผ่อนจาก 32 → 30
+        "min_face_sharpness": 14.0,      # ผ่อนจาก 15 → 14
+        "face_scan_unknown": 0.25,       # เร็วขึ้น: 300ms → 250ms
+        "face_scan_known": 0.70,         # เร็วขึ้น: 800ms → 700ms
+        "embed_unknown": 0.90,           # เร็วขึ้น: 1.00s → 0.90s
+        "embed_known": 2.20,             # เร็วขึ้น: 2.50s → 2.20s
+    },
+    "high": {
+        # สำหรับเครื่องที่แรง (i7/Ryzen 5+ หรือ GPU)
+        "camera_width": 1280,
+        "camera_height": 720,
+        "camera_fps": 30,
+        "yolo_img_size": 640,
+        "yolo_max_det": 30,
+        "gui_interval_ms": 25,
+        "human_detect_interval": 0.05,
+        "max_recognition_tracks": 8,
+        "max_pending_recognition": 3,
+        "min_recognition_face_px": 28,
+        "min_face_sharpness": 12.0,
+        "face_scan_unknown": 0.18,
+        "face_scan_known": 0.55,
+        "embed_unknown": 0.70,
+        "embed_known": 1.80,
     },
 }
 

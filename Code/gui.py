@@ -37,6 +37,10 @@ class FaceRecognitionGUI:
         self.disp_h = int(cam_h * scale)
         self._display_scale = scale
 
+        # Pre-allocate letterbox background ครั้งเดียว
+        # update_camera เรียก .copy() แทน Image.new() ทุก 33ms
+        self._cam_bg = Image.new("RGB", (self.disp_w, self.disp_h), (0, 0, 0))
+
         if scale < 1.0:
             print(f"[GUI] scale {cam_w}x{cam_h} → {self.disp_w}x{self.disp_h} (x{scale:.2f})")
         self._build_ui()
@@ -118,7 +122,7 @@ class FaceRecognitionGUI:
         img_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
 
         if new_w != self.disp_w or new_h != self.disp_h:
-            pil_bg    = Image.new("RGB", (self.disp_w, self.disp_h), (0, 0, 0))
+            pil_bg    = self._cam_bg.copy()   # copy ถูกกว่า Image.new ทุก 33ms
             pil_frame = Image.fromarray(img_rgb)
             pad_x = (self.disp_w - new_w) // 2
             pad_y = (self.disp_h - new_h) // 2

@@ -14,9 +14,10 @@ import sqlite3
 import numpy as np
 
 DB_PATH      = "faces.db"
-THRESHOLD    = 0.75   # cosine similarity ต่ำกว่านี้ = Unknown
-MATCH_MARGIN = 0.035  # อันดับ 1 ต้องชนะอันดับ 2 อย่างน้อยเท่านี้
-TOP_K_PER_PERSON = 3  # รวมคะแนนจาก vector ที่ดีที่สุดของแต่ละคน
+THRESHOLD    = 0.72   # cosine similarity ต่ำกว่านี้ = Unknown
+              # 0.75 เข้มเกินสำหรับสภาพแสงจริง / ใบหน้าบางส่วน → ลดเป็น 0.72
+MATCH_MARGIN = 0.03   # อันดับ 1 ต้องชนะอันดับ 2 อย่างน้อยเท่านี้
+TOP_K_PER_PERSON = 5  # รวมคะแนนจาก vector ที่ดีที่สุดของแต่ละคน (เพิ่มจาก 3 → 5)
 
 # ── In-memory index ──────────────────────────────────────────────────────────
 class FaceIndex:

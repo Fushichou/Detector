@@ -30,21 +30,27 @@ def _get_model():
     return _model
 
 
+_letterbox_cache: dict = {}   # (h, w, size) → (scale, new_w, new_h, pad_x, pad_y)
+
 def _letterbox(frame, size=IMG_SIZE):
     """Resize with padding so YOLO sees a square image without aspect distortion."""
     h, w = frame.shape[:2]
     if h <= 0 or w <= 0:
         return None, 1.0, 0, 0
 
-    scale = min(size / w, size / h)
-    new_w = max(1, int(round(w * scale)))
-    new_h = max(1, int(round(h * scale)))
+    key = (h, w, size)
+    if key not in _letterbox_cache:
+        scale = min(size / w, size / h)
+        new_w = max(1, int(round(w * scale)))
+        new_h = max(1, int(round(h * scale)))
+        pad_x = (size - new_w) // 2
+        pad_y = (size - new_h) // 2
+        _letterbox_cache[key] = (scale, new_w, new_h, pad_x, pad_y)
 
+    scale, new_w, new_h, pad_x, pad_y = _letterbox_cache[key]
     interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
     resized = cv2.resize(frame, (new_w, new_h), interpolation=interp)
 
-    pad_x = (size - new_w) // 2
-    pad_y = (size - new_h) // 2
     padded = cv2.copyMakeBorder(
         resized,
         pad_y, size - new_h - pad_y,
