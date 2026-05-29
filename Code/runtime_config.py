@@ -1,12 +1,10 @@
 import os
 
-
 def _env_int(name, default):
     try:
         return int(os.getenv(name, default))
     except (TypeError, ValueError):
         return default
-
 
 def _env_float(name, default):
     try:
@@ -14,32 +12,31 @@ def _env_float(name, default):
     except (TypeError, ValueError):
         return default
 
-
 # Defaults target low-spec machines. Override with environment variables later
 # without changing code, for example DETECT_PROFILE=balanced.
 PROFILE = os.getenv("DETECT_PROFILE", "low").strip().lower()
 
 PROFILES = {
     "low": {
-        "camera_width": 640,
-        "camera_height": 480,
+        "camera_width": 1280,
+        "camera_height": 720,
         "camera_fps": 24,
         "yolo_img_size": 384,
         "yolo_max_det": 12,
-        "gui_interval_ms": 50,
+        "gui_interval_ms": 33,       # 50ms → 33ms: ขจัดลิมิต 20 FPS ออก
         "human_detect_interval": 0.12,
         "max_recognition_tracks": 3,
         "max_pending_recognition": 1,
-        "min_recognition_face_px": 36,
-        "min_face_sharpness": 18.0,
+        "min_recognition_face_px": 40,
+        "min_face_sharpness": 25.0,
         "face_scan_unknown": 0.45,
         "face_scan_known": 1.00,
         "embed_unknown": 1.50,
         "embed_known": 4.00,
     },
     "balanced": {
-        "camera_width": 640,
-        "camera_height": 480,
+        "camera_width": 1280,
+        "camera_height": 720,
         "camera_fps": 30,
         "yolo_img_size": 416,
         "yolo_max_det": 20,
@@ -56,8 +53,8 @@ PROFILES = {
     },
     "high": {
         # สำหรับเครื่องที่แรง (i7/Ryzen 5+ หรือ GPU)
-        "camera_width": 1280,
-        "camera_height": 720,
+        "camera_width": 1920,
+        "camera_height": 1080,
         "camera_fps": 30,
         "yolo_img_size": 640,
         "yolo_max_det": 30,

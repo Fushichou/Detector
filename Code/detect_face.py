@@ -5,11 +5,21 @@ from mediapipe.tasks.python import vision
 import os
 import math
 import numpy as np
+
 # ── โหลด model file ────────────────────────────────────────────────────────────
 MODEL_PATH = r"Model\blaze_face_short_range.tflite"
 MIN_FACE_INPUT = 40
 MIN_FACE_SIZE = 20
 MAX_DETECT_DIM = 384
+
+# พิกัดอ้างอิงมาตรฐาน (Standard Template 5 จุด) ขนาด 112x112 ที่ทำให้ ArcFace ทำงานได้แม่นยำที่สุด
+ARC_FACE_TEMPLATE = np.array([
+    [30.2946, 51.6963],  # ตาขวา (ในพิกัดภาพด้านซ้าย)
+    [65.5318, 51.5014],  # ตาซ้าย (ในพิกัดภาพด้านขวา)
+    [48.0252, 71.7366],  # ปลายจมูก
+    [33.5493, 92.3655],  # มุมปากขวา (ในพิกัดภาพด้านซ้าย)
+    [64.4416, 92.2041]   # มุมปากซ้าย (ในพิกัดภาพด้านขวา)
+], dtype=np.float32)
 
 def _ensure_model():
     if os.path.exists(MODEL_PATH):
@@ -18,6 +28,7 @@ def _ensure_model():
         f"Missing face detector model: {MODEL_PATH}. "
         "Place blaze_face_short_range.tflite in the project folder before running."
     )
+
 # ── Lazy load detector ─────────────────────────────────────────────────────────
 _detector = None
 
@@ -60,7 +71,7 @@ def _resize_for_detection(roi):
 
 def detect_face(roi, with_keypoints=False):
     """
-    ตรวจจับใบหน้าใน ROI ด้วย MediaPipe Tasks API (ใหม่)
+    ตรวจจับใบหน้าใน ROI ด้วย MediaPipe Tasks API
     คืนค่า list of (x, y, w, h) ในระบบพิกัดของ roi
     ถ้า with_keypoints=True จะคืน dict {"box": ..., "keypoints": ...}
     """
@@ -108,63 +119,68 @@ def detect_face(roi, with_keypoints=False):
 
     return faces
 
-def _crop_aligned_by_eyes(frame, fx, fy, fw, fh, keypoints, size):
-    if not keypoints or len(keypoints) < 2:
+def _align_by_multiple_keypoints(frame, keypoints, size):
+    """
+    เปลี่ยนจากการใช้ติ่งหู มาเป็นการจำลองพิกัดมุมปากซ้าย-ขวาอิงตามระนาบดวงตา 
+    ทำให้ได้พิกัดสมมาตรครบ 5 จุดตามมาตรฐาน ArcFace หน้าจะตรง นิ่ง และแม่นยำสูงสุด
+    """
+    if not keypoints or len(keypoints) < 4:  # ต้องการอย่างน้อย ตาขวาภาพ, ตาซ้ายภาพ, จมูก, กึ่งกลางปาก
         return None
 
-    eyes = sorted(keypoints[:2], key=lambda p: p[0])
-    left_eye, right_eye = eyes[0], eyes[1]
-    dx = right_eye[0] - left_eye[0]
-    dy = right_eye[1] - left_eye[1]
-    eye_dist = math.hypot(dx, dy)
-    if eye_dist < 8:
+    try:
+        r_eye = np.array(keypoints[0])         # ตาขวาในพิกัดภาพ (ตาซ้ายของคน)
+        l_eye = np.array(keypoints[1])         # ตาซ้ายในพิกัดภาพ (ตาขวาของคน)
+        nose = np.array(keypoints[2])          # ปลายจมูก
+        mouth_center = np.array(keypoints[3])  # จุดกึ่งกลางปากจาก MediaPipe
+
+        # 1. คำนวณหาระนาบความเอียงและระยะห่างของตาเพื่อใช้เป็นความกว้างอ้างอิง (Scale)
+        eye_dx = l_eye[0] - r_eye[0]
+        eye_dy = l_eye[1] - r_eye[1]
+        eye_dist = math.hypot(eye_dx, eye_dy)
+
+        if eye_dist < 4:
+            return None
+
+        # คำนวณหา Unit Vector แนวนอน (ux, uy) ตามทิศทางดวงตา ป้องกันบั๊กเวลาเอียงคอ
+        ux = eye_dx / eye_dist
+        uy = eye_dy / eye_dist
+
+        # 2. จำลองพิกัด "มุมปากขวาภาพ" และ "มุมปากซ้ายภาพ" ออกมาจากจุดกึ่งกลางปาก
+        # อิงตามสัดส่วนโครงสร้างสากล (ความกว้างปากซ้าย-ขวารวมกันจะประมาณ 50% ของความกว้างตา)
+        mouth_width_half = eye_dist * 0.25 
+        
+        r_mouth = mouth_center - (np.array([ux, uy]) * mouth_width_half)
+        l_mouth = mouth_center + (np.array([ux, uy]) * mouth_width_half)
+
+        # 3. รวมจุดที่คำนวณใหม่ได้ครบ 5 จุดสากลตามลำดับของ Template
+        pts_src = np.array([r_eye, l_eye, nose, r_mouth, l_mouth], dtype=np.float32)
+
+        # 4. หา Affine Matrix สำหรับการจัดตำแหน่งแบบไร้ความบิดเบี้ยว (Similarity Transform)
+        M, _ = cv2.estimateAffinePartial2D(pts_src, ARC_FACE_TEMPLATE)
+        if M is None:
+            M = cv2.getAffineTransform(pts_src[:3], ARC_FACE_TEMPLATE[:3])
+
+        # ทำการตัดภาพและปรับให้หน้าตรงเป๊ะเป็นขนาด 112x112 ทันที
+        aligned_face = cv2.warpAffine(frame, M, (112, 112), flags=cv2.INTER_CUBIC)
+
+        # หากระบบต้องการขนาดอื่นนอกจาก 112 ให้ resize ปลายทาง
+        if size != 112:
+            aligned_face = cv2.resize(aligned_face, (size, size), interpolation=cv2.INTER_AREA)
+
+        return aligned_face
+
+    except Exception as e:
+        print(f"[detect_face] Multi-point Alignment ล้มเหลว: {e}")
         return None
-
-    center = ((left_eye[0] + right_eye[0]) / 2.0, (left_eye[1] + right_eye[1]) / 2.0)
-    angle = math.degrees(math.atan2(dy, dx))
-    rot = cv2.getRotationMatrix2D(center, angle, 1.0)
-
-    h, w = frame.shape[:2]
-    rotated = cv2.warpAffine(
-        frame,
-        rot,
-        (w, h),
-        flags=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_REPLICATE,
-    )
-
-    corners = np.array([
-        [fx, fy],
-        [fx + fw, fy],
-        [fx + fw, fy + fh],
-        [fx, fy + fh],
-    ], dtype=np.float32)
-    ones = np.ones((4, 1), dtype=np.float32)
-    rotated_corners = np.hstack([corners, ones]).dot(rot.T)
-
-    x1 = int(np.floor(rotated_corners[:, 0].min()))
-    y1 = int(np.floor(rotated_corners[:, 1].min()))
-    x2 = int(np.ceil(rotated_corners[:, 0].max()))
-    y2 = int(np.ceil(rotated_corners[:, 1].max()))
-
-    pad = int(max(x2 - x1, y2 - y1) * 0.2)
-    x1 = max(0, x1 - pad)
-    y1 = max(0, y1 - pad)
-    x2 = min(w, x2 + pad)
-    y2 = min(h, y2 + pad)
-
-    face_crop = rotated[y1:y2, x1:x2]
-    if face_crop.size == 0:
-        return None
-
-    return cv2.resize(face_crop, (size, size), interpolation=cv2.INTER_AREA)
 
 def crop_face_fixed(frame, fx, fy, fw, fh, size=112, keypoints=None, return_aligned=False):
-    """Crop ใบหน้าพร้อม padding แล้ว resize เป็น size×size สำหรับ embedding"""
-    aligned = _crop_aligned_by_eyes(frame, fx, fy, fw, fh, keypoints, size)
-    if aligned is not None:
-        return (aligned, True) if return_aligned else aligned
+    """Crop ใบหน้าพร้อมปรับทิศทางโครงสร้างและขนาดให้อยู่กึ่งกลางสากลสำหรับสกัด Embedding"""
+    if keypoints is not None:
+        aligned = _align_by_multiple_keypoints(frame, keypoints, size)
+        if aligned is not None:
+            return (aligned, True) if return_aligned else aligned
 
+    # Fallback แบบ Padding เดิมกรณีโมเดลหา Keypoints ไม่เจอหรือไม่ครบจุด
     pad = int(max(fw, fh) * 0.2)
     x1 = max(0, fx - pad)
     y1 = max(0, fy - pad)

@@ -9,6 +9,7 @@ from detecthuman import detect_human
 from face_db import build_index, find_match, init_db, load_all
 from face_embedding import get_embedding
 from gui import FaceRecognitionGUI
+from db_manager import DBManager
 from runtime_config import (
     CAMERA_FPS,
     CAMERA_HEIGHT,
@@ -25,7 +26,8 @@ from runtime_config import (
     MIN_RECOGNITION_FACE_PX,
     PROFILE,
 )
-ALPHA                = 0.35
+
+ALPHA                 = 0.35
 FACE_SIZE            = 112
 IDENTITY_LOST_TIMEOUT = 1.25
 TRACK_MIN_IOU        = 0.03
@@ -168,17 +170,10 @@ def draw_overlay(frame, tracked):
     return frame
 
 def face_quality_ok(face_img, face_w, face_h, roi_crop=None) -> bool:
-    """
-    ตรวจสอบคุณภาพใบหน้า
-    roi_crop: ภาพใบหน้าจาก ROI ก่อน resize — ใช้คำนวณ sharpness ที่ความละเอียดเต็ม
-    ถ้าไม่มี roi_crop จะ fallback เป็น face_img (112×112)
-    """
     if face_img is None:
         return False
     if min(face_w, face_h) < MIN_RECOGNITION_FACE_PX:
         return False
-    # คำนวณ sharpness บนภาพความละเอียดสูงสุดที่มี
-    # ถ้าหน้าเล็ก (เช่น 40px) แล้ว upsample ไป 112 ก่อน blur จะเสียข้อมูล
     src = roi_crop if (roi_crop is not None and roi_crop.size > 0) else face_img
     gray      = cv2.cvtColor(src, cv2.COLOR_BGR2GRAY)
     sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
@@ -192,6 +187,7 @@ def _recognition_failure(job) -> dict:
         "found":       False,
         "submitted_ts": job["submitted_ts"],
     }
+
 def recognition_worker(stop_event, job_queue, result_queue):
     while not stop_event.is_set():
         try:
@@ -270,7 +266,6 @@ def main():
     print(f"[DB] Loaded {len(db_records)} faces")
 
     # โหลดทุก model ล่วงหน้าใน background thread ก่อนคนแรกเดินเข้ากล้อง
-    # ArcFace ~2-3s, YOLO ~1s, MediaPipe ~0.5s — ทำพร้อมกันใน thread แยก
     def _prewarm_embedding():
         from face_embedding import _get_model
         try:
@@ -311,8 +306,10 @@ def main():
     db_lock       = threading.Lock()
     latest_frame  = {"value": None}
     tracked_state = {"value": []}
+    cam_fps_state = {"value": 0.0}   # FPS จริงของกล้อง วัดใน camera_thread
     recognition_jobs    = queue.Queue(maxsize=MAX_PENDING_RECOGNITION)
     recognition_results = queue.Queue()
+    camera_switch_request = {"value": None}  # เก็บ source ใหม่ที่ต้องการสลับไป
     
     def camera_thread():
         is_video_file = video_path is not None
@@ -323,18 +320,53 @@ def main():
         else:
             frame_delay = 0.0
         t_next = time.perf_counter()
+        cam_fps_buf = deque(maxlen=30)
+        t_cam_prev  = time.perf_counter()
+        current_cap = cap  # เก็บ reference ของ camera object
+        
         while not stop_event.is_set():
-            ret, frame = cap.read()
+            # ตรวจสอบว่าต้องสลับ camera source หรือไม่
+            with state_lock:
+                switch_request = camera_switch_request["value"]
+            
+            if switch_request is not None and not is_video_file:
+                # ถ้ามีขอให้สลับและไม่ได้ใช้ video file
+                try:
+                    print(f"[Camera] สลับ camera source → {switch_request}")
+                    current_cap.release()
+                    current_cap = open_camera(
+                        source=switch_request,
+                        width=CAMERA_WIDTH,
+                        height=CAMERA_HEIGHT,
+                        fps=CAMERA_FPS
+                    )
+                    new_w = int(current_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                    new_h = int(current_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                    print(f"[Camera] เปิด camera source {switch_request} สำเร็จ (resolution: {new_w}x{new_h})")
+                    with state_lock:
+                        camera_switch_request["value"] = None
+                except Exception as e:
+                    print(f"[Camera] ล้มเหลวในการสลับ camera: {e}")
+                    with state_lock:
+                        camera_switch_request["value"] = None
+            
+            ret, frame = current_cap.read()
             if not ret:
                 if is_video_file:
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    current_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     t_next = time.perf_counter()
                 else:
                     time.sleep(0.02)
                 continue
 
+            t_cam_now = time.perf_counter()
+            cam_fps_buf.append(1.0 / max(t_cam_now - t_cam_prev, 1e-6))
+            t_cam_prev = t_cam_now
+
             with state_lock:
                 latest_frame["value"] = frame
+                cam_fps_state["value"] = sum(cam_fps_buf) / len(cam_fps_buf)
+
             if is_video_file:
                 t_next += frame_delay
                 sleep_time = t_next - time.perf_counter()
@@ -343,7 +375,7 @@ def main():
                 else:
                     t_next = time.perf_counter()
 
-        cap.release()
+        current_cap.release()
 
     def detect_thread():
         nonlocal db_records
@@ -366,8 +398,7 @@ def main():
             if now - last_detect_ts < HUMAN_DETECT_INTERVAL:
                 continue
             last_detect_ts = now
-            # ไม่ต้อง copy frame — detect_human / detect_face ไม่ mutate ภาพ
-            # camera_thread แค่สลับ reference ใน latest_frame["value"] ไม่แก้ข้อมูล array เก่า
+            
             frame_h, frame_w = frame.shape[:2]
             try:
                 humans = detect_human(frame)
@@ -416,12 +447,18 @@ def main():
                             keypoints=face.get("keypoints"),
                             return_aligned=True,
                         )
-                        # sharpness บน roi ดิบก่อน resize — ถูกต้องกว่าการเช็คบน 112×112
                         raw_face = roi[fy:fy + fh, fx:fx + fw]
-                        if face_quality_ok(face_img, fw, fh, roi_crop=raw_face if raw_face.size > 0 else None):
+                        if raw_face.size > 0 and min(fw, fh) < 112:
+                            raw_face_enhanced = cv2.resize(raw_face, (112, 112), interpolation=cv2.INTER_CUBIC)
+                        else:
+                            raw_face_enhanced = raw_face if raw_face.size > 0 else None
+
+                        # ตรวจสอบคุณภาพโดยใช้ภาพที่ผ่านการ Enhanced แล้ว ขอบเขตความชัดจะทำงานได้ดีขึ้นในระยะไกล
+                        if face_quality_ok(face_img, fw, fh, roi_crop=raw_face_enhanced):
                             person["face_img"]     = face_img
                             person["face_aligned"] = face_aligned
                         else:
+                            # ถ้าภาพเบลอหรือเล็กเกินเกณฑ์จริง ค่อยเคลียร์ค่า
                             person["face_img"]     = None
                             person["face_aligned"] = False
                     else:
@@ -444,6 +481,7 @@ def main():
 
             with state_lock:
                 tracked_state["value"] = [item.copy() for item in tracked]
+
     threads = [
         threading.Thread(target=camera_thread, daemon=True),
         threading.Thread(target=detect_thread, daemon=True),
@@ -455,6 +493,7 @@ def main():
     ]
     for thread in threads:
         thread.start()
+
     actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     if actual_w <= 0 or actual_h <= 0:
@@ -462,25 +501,96 @@ def main():
     print(f"[Source] resolution จริง: {actual_w}x{actual_h}")
 
     gui = FaceRecognitionGUI(cam_w=actual_w, cam_h=actual_h, interval_ms=GUI_INTERVAL_MS)
-    fps_buf = deque(maxlen=30)   # deque O(1) append/discard vs list.pop(0) O(n)
+
+    # ── ตั้งค่า callback สำหรับสลับ camera source ───────────────────────────────────────────
+    def switch_camera_source(source):
+        """ขอให้สลับ camera source ในเธรด camera"""
+        with state_lock:
+            camera_switch_request["value"] = source
+        camera_switch_status["source"] = source
+        camera_switch_status["timestamp"] = time.perf_counter()
+        gui.set_status(f"กำลังสลับเป็น Camera {source}...")
+        print(f"[UI] ขอสลับเป็น camera source {source}")
+
+    gui.set_camera_callback(switch_camera_source)
+    
+    # ตัวแปรเพื่อติดตามสถานะการสลับ camera
+    camera_switch_status = {"source": None, "timestamp": 0}
+
+    # ── ผูกปุ่ม "จัดการ DB" [จุดที่แก้ไขบั๊กค้าง] ───────────────────────────────────────────
+    _db_win_open = {"value": False}   # ป้องกันเปิดซ้ำ
+
+    def open_db_manager():
+        nonlocal db_records
+        if _db_win_open["value"]:
+            return
+        _db_win_open["value"] = True
+
+        def on_db_close():
+            # สั่งสร้าง Thread ย่อยแยกงานสกัดฟีเจอร์ของคนใหม่ออกไปทำใน Background ทันที
+            # ป้องกันการแย่ง RAM/GPU ของตัวสตรีมหลักขณะที่โหลดรูปภาพชุดใหม่เข้าสู่ระบบ
+            def bg_reload_db():
+                nonlocal db_records
+                try:
+                    gui.set_status("กำลังอัปเดตและคำนวณฐานข้อมูลใบหน้าใหม่...")
+                    print("[DB] เริ่มสแกนและโหลดข้อมูลคนใหม่เข้าฐานข้อมูลแบบ Background...")
+                    
+                    # คำนวณ Index โครงสร้างความเหมือนไว้บนตัวแปรจำลองก่อน
+                    fresh = build_index(load_all())
+                    
+                    # เมื่อระบบหลังบ้านคำนวณเวกเตอร์เสร็จเรียบร้อย ค่อยสลับค่าใช้งานจริงภายในเสี้ยววินาที
+                    with db_lock:
+                        db_records = fresh
+                        
+                    gui.set_status(f"อัปเดตสำเร็จ! พร้อมตรวจจับใบหน้าใหม่แล้ว ({len(fresh)} ใบหน้า)")
+                    print(f"[DB] ซิงค์ฐานข้อมูลคนใหม่เสร็จสิ้น! จำนวนใบหน้ารวม: {len(fresh)}")
+                except Exception as ex:
+                    gui.set_status("เกิดข้อผิดพลาดในการโหลดฐานข้อมูล!")
+                    print(f"[DB] Background reloader ล้มเหลว: {ex}")
+                finally:
+                    _db_win_open["value"] = False
+
+            # เริ่มระบบการประมวลผลหลังบ้านแบบ Async ทันทีที่หน้าต่างผู้จัดการปิดตัวลง
+            threading.Thread(target=bg_reload_db, daemon=True).start()
+
+        DBManager(parent=gui.root, on_close=on_db_close)
+
+    gui.set_db_callback(open_db_manager)
+    fps_buf = deque(maxlen=30)
     t_prev  = time.perf_counter()
 
     def loop():
         nonlocal t_prev
         with state_lock:
-            frame   = latest_frame["value"]
-            tracked = tracked_state["value"]
+            frame    = latest_frame["value"]
+            tracked  = tracked_state["value"]
+            cam_fps  = cam_fps_state["value"]
+            current_switch = camera_switch_request["value"]
+
+        # ตรวจสอบว่าการสลับ camera เสร็จสิ้นแล้วหรือยัง
+        if (
+            current_switch is None
+            and camera_switch_status["source"] is not None
+            and time.perf_counter() - camera_switch_status["timestamp"] < 2.0
+        ):
+            # แสดงข้อความสำเร็จ (ทำให้เห็นนาน 2 วินาที)
+            if time.perf_counter() - camera_switch_status["timestamp"] < 1.5:
+                gui.set_status(f"✓ สลับเป็น Camera {camera_switch_status['source']} สำเร็จ")
+        elif current_switch is None and camera_switch_status["source"] is not None:
+            # หลังจาก 2 วินาที ให้ reset สถานะ
+            camera_switch_status["source"] = None
+            gui.set_status("พร้อมทำงาน")
 
         if frame is None:
             return
         t_now = time.perf_counter()
         fps_buf.append(1.0 / max(t_now - t_prev, 1e-6))
         t_prev = t_now
-        fps = sum(fps_buf) / len(fps_buf)
+        gui_fps = sum(fps_buf) / len(fps_buf)
 
         display = draw_overlay(frame.copy(), tracked)
         gui.update_camera(display)
-        gui.update_stats(fps, len(tracked))
+        gui.update_stats(cam_fps, gui_fps, len(tracked))
         gui.update_faces([
             {
                 "id":       item.get("track_id", i),
@@ -491,6 +601,7 @@ def main():
             }
             for i, item in enumerate(tracked)
         ])
+
     def on_key(event):
         nonlocal db_records
         key = (event.char or "").lower()
@@ -498,11 +609,22 @@ def main():
             stop_event.set()
             gui.destroy()
         elif key == "r":
-            fresh = build_index(load_all())
-            with db_lock:
-                db_records = fresh
-            gui.set_status(f"Reload DB: {len(fresh)} faces")
-            print(f"[DB] Reload: {len(fresh)} faces")
+            # ปรับเปลี่ยนให้ปุ่มลัดคีย์บอร์ด "R" ทำงานใน Background Thread เช่นเดียวกันป้องกันหน้าจอค้าง
+            def manual_reload():
+                nonlocal db_records
+                fresh = build_index(load_all())
+                with db_lock:
+                    db_records = fresh
+                gui.set_status(f"Manual Reload สำเร็จ: {len(fresh)} ใบหน้า")
+            threading.Thread(target=manual_reload, daemon=True).start()
+        elif key == "0":
+            # กด 0 เพื่อสลับไป camera source 0
+            gui.camera_var.set("0")
+            switch_camera_source(0)
+        elif key == "1":
+            # กด 1 เพื่อสลับไป camera source 1
+            gui.camera_var.set("1")
+            switch_camera_source(1)
 
     gui.root.bind("<Key>", on_key)
     try:
@@ -511,5 +633,6 @@ def main():
         stop_event.set()
         for thread in threads:
             thread.join(timeout=1.0)
+
 if __name__ == "__main__":
     main()
