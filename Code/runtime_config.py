@@ -23,7 +23,7 @@ PROFILES = {
         "camera_fps": 24,
         "yolo_img_size": 384,
         "yolo_max_det": 12,
-        "gui_interval_ms": 33,       # 50ms → 33ms: ขจัดลิมิต 20 FPS ออก
+        "gui_interval_ms": 33,      
         "human_detect_interval": 0.12,
         "max_recognition_tracks": 3,
         "max_pending_recognition": 1,
@@ -52,7 +52,6 @@ PROFILES = {
         "embed_known": 2.20,             # เร็วขึ้น: 2.50s → 2.20s
     },
     "high": {
-        # สำหรับเครื่องที่แรง (i7/Ryzen 5+ หรือ GPU)
         "camera_width": 1920,
         "camera_height": 1080,
         "camera_fps": 30,

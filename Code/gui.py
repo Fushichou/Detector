@@ -28,7 +28,7 @@ class FaceRecognitionGUI:
         self.root.title("Face Recognition System")
         self.root.configure(bg="#0f172a")
         self.root.resizable(True, True)
-        self.root.geometry("1400x800")  # Default window size
+        self.root.geometry("1280x720")  # Default window size
 
         self.interval_ms = interval_ms
         self._face_cards = {}

@@ -7,16 +7,14 @@ face_db.py — ฐานข้อมูลใบหน้า
   persons(id, name, created_at)
   face_vectors(id, person_id, vector BLOB)
 """
-
 import io
 import os
 import sqlite3
 import numpy as np
 
 DB_PATH      = "faces.db"
-THRESHOLD    = 0.72   # cosine similarity ต่ำกว่านี้ = Unknown
-              # 0.75 เข้มเกินสำหรับสภาพแสงจริง / ใบหน้าบางส่วน → ลดเป็น 0.72
-MATCH_MARGIN = 0.03   # อันดับ 1 ต้องชนะอันดับ 2 อย่างน้อยเท่านี้
+THRESHOLD    = 0.70   # cosine similarity ต่ำกว่านี้ = Unknown
+MATCH_MARGIN = 0.10   # % ที่ต้องห่างจากอันดับสองเพื่อยืนยันการจับคู่
 TOP_K_PER_PERSON = 5  # รวมคะแนนจาก vector ที่ดีที่สุดของแต่ละคน (เพิ่มจาก 3 → 5)
 
 # ── In-memory index ──────────────────────────────────────────────────────────
@@ -68,8 +66,7 @@ def _normalize_vector(vector: np.ndarray) -> np.ndarray:
         vec = vec / norm
     return vec
 #Schema 
-def init_db():
-    """สร้างตาราง (ถ้ายังไม่มี)"""
+def init_db(): # สร้างตารางถ้ายังไม่มี
     con = _connect()
     con.execute("PRAGMA journal_mode=WAL")
     con.executescript("""

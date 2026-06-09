@@ -27,10 +27,10 @@ from runtime_config import (
     PROFILE,
 )
 
-ALPHA                 = 0.35
-FACE_SIZE            = 112
+ALPHA = 0.35
+FACE_SIZE = 112
 IDENTITY_LOST_TIMEOUT = 1.25
-TRACK_MIN_IOU        = 0.03
+TRACK_MIN_IOU = 0.03
 TRACK_MIN_SIZE_RATIO = 0.45
 
 GREEN = (0, 220, 80)
