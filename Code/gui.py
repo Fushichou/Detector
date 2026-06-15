@@ -1,13 +1,3 @@
-"""
-gui.py — Tkinter UI สำหรับแสดงกล้องและผลจำใบหน้า
-
-แนวคิด:
-- ภาพกล้องอัปเดตตามรอบที่กำหนดใน main.py
-- thumbnail ใบหน้าอัปเดตเฉพาะเมื่อข้อมูลเปลี่ยนจริง
-- mask วงกลมสร้างครั้งเดียวแล้ว reuse
-- cam_label ปรับขนาดอัตโนมัติตาม resolution จริงของ source
-"""
-
 import tkinter as tk 
 from tkinter import ttk
 import cv2
@@ -26,7 +16,7 @@ class FaceRecognitionGUI:
     def __init__(self, cam_w=640, cam_h=480, interval_ms=33):
         self.root = tk.Tk()
         self.root.title("Face Recognition System")
-        self.root.configure(bg="#0f172a")
+        self.root.configure(bg="#bbbbbb")
         self.root.resizable(True, True)
         self.root.geometry("1280x720")  # Default window size
 

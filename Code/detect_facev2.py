@@ -7,7 +7,7 @@ import math
 import numpy as np
 
 # ── โหลด model file ────────────────────────────────────────────────────────────
-MODEL_PATH = r"Model\blaze_face_short_range.tflited"
+MODEL_PATH = r"Model\blaze_face_short_range.tflite"  # แก้ไขนามสกุลไฟล์ .tflited -> .tflite
 MIN_FACE_INPUT = 40
 MIN_FACE_SIZE = 20
 MAX_DETECT_DIM = 384
@@ -47,11 +47,10 @@ def _get_detector():
 def _keypoints_to_pixels(det, width, height):
     keypoints = []
     for kp in det.keypoints or []:
-        x = float(kp.x)
-        y = float(kp.y)
-        if 0.0 <= x <= 1.0 and 0.0 <= y <= 1.0:
-            x *= width
-            y *= height
+        # แก้ไขบั๊ก: ถอดเงื่อนไขตรรกะเช็ค 0.0 <= x <= 1.0 ออก 
+        # เพราะหากโมเดลตรวจจับหลุดขอบจอ (เช่น ติดลบ หรือ เกิน 1) จะต้องถูกคูณสเกลภาพทั้งหมด ห้ามผสมพิกัดดิบ
+        x = float(kp.x) * width
+        y = float(kp.y) * height
         keypoints.append((x, y))
     return keypoints
 
@@ -128,17 +127,17 @@ def _align_by_multiple_keypoints(frame, keypoints, size):
         return None
 
     try:
-        r_eye = np.array(keypoints[0])         # ตาขวาในพิกัดภาพ (ตาซ้ายของคน)
-        l_eye = np.array(keypoints[1])         # ตาซ้ายในพิกัดภาพ (ตาขวาของคน)
-        nose = np.array(keypoints[2])          # ปลายจมูก
-        mouth_center = np.array(keypoints[3])  # จุดกึ่งกลางปากจาก MediaPipe
+        r_eye = np.array(keypoints[0], dtype=np.float32)         # ตาขวาในพิกัดภาพ (ตาซ้ายของคน)
+        l_eye = np.array(keypoints[1], dtype=np.float32)         # ตาซ้ายในพิกัดภาพ (ตาขวาของคน)
+        nose = np.array(keypoints[2], dtype=np.float32)          # ปลายจมูก
+        mouth_center = np.array(keypoints[3], dtype=np.float32)  # จุดกึ่งกลางปากจาก MediaPipe
 
         # 1. คำนวณหาระนาบความเอียงและระยะห่างของตาเพื่อใช้เป็นความกว้างอ้างอิง (Scale)
         eye_dx = l_eye[0] - r_eye[0]
         eye_dy = l_eye[1] - r_eye[1]
         eye_dist = math.hypot(eye_dx, eye_dy)
 
-        if eye_dist < 4:
+        if eye_dist < 4.0:
             return None
 
         # คำนวณหา Unit Vector แนวนอน (ux, uy) ตามทิศทางดวงตา ป้องกันบั๊กเวลาเอียงคอ
@@ -148,9 +147,10 @@ def _align_by_multiple_keypoints(frame, keypoints, size):
         # 2. จำลองพิกัด "มุมปากขวาภาพ" และ "มุมปากซ้ายภาพ" ออกมาจากจุดกึ่งกลางปาก
         # อิงตามสัดส่วนโครงสร้างสากล (ความกว้างปากซ้าย-ขวารวมกันจะประมาณ 50% ของความกว้างตา)
         mouth_width_half = eye_dist * 0.25 
+        u_vector = np.array([ux, uy], dtype=np.float32)
         
-        r_mouth = mouth_center - (np.array([ux, uy]) * mouth_width_half)
-        l_mouth = mouth_center + (np.array([ux, uy]) * mouth_width_half)
+        r_mouth = mouth_center - (u_vector * mouth_width_half)
+        l_mouth = mouth_center + (u_vector * mouth_width_half)
 
         # 3. รวมจุดที่คำนวณใหม่ได้ครบ 5 จุดสากลตามลำดับของ Template
         pts_src = np.array([r_eye, l_eye, nose, r_mouth, l_mouth], dtype=np.float32)

@@ -4,7 +4,7 @@ import time
 import cv2
 from collections import deque
 from camera import ask_video_source, open_camera
-from detect_face import crop_face_fixed, detect_face
+from detect_facev2 import crop_face_fixed, detect_face
 from detecthuman import detect_human
 from face_db import build_index, find_match, init_db, load_all
 from face_embedding import get_embedding
